@@ -1,21 +1,19 @@
 import os
-from fastapi import FastAPI, Form, HTTPException
+import uuid
+import requests
+import xml.etree.ElementTree as ET
+from fastapi import FastAPI, Form
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
 from gtts import gTTS
 from g2pk import G2p
 from hangul_romanize import Transliter
 from hangul_romanize.rule import academic
-from korean_romanizer.romanizer import Romanizer #
-from fastapi.responses import JSONResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from deep_translator import GoogleTranslator
 from konlpy.tag import Okt
-import uuid
-import requests
-import xml.etree.ElementTree as ET
-
+from deep_translator import GoogleTranslator
 
 # --- 환경 변수 설정 ---
 api_key = os.getenv("OPENAI_API_KEY")
@@ -41,11 +39,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Pydantic 모델 정의 ---
+# --- Pydantic 모델 ---
 class TextInput(BaseModel):
     text: str
 
-# --- 시스템 프롬프트 정의 ---
+# --- 시스템 프롬프트 ---
 SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가야.
 입력된 문장은 다음을 중복 포함할 수 있어:
 1. 속담 또는 관용어
@@ -69,29 +67,25 @@ SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가�
 질문 형태를 그대로 유지하면서 쉬운 단어로 바꿔.
 예시) 입력 : 국무총리는 어떻게 임명돼? / 출력 : 국무총리는 어떻게 정해?"""
 
-# --- 기존 모듈 초기화 ---
+# --- 도우미 모듈 초기화 ---
 g2p = G2p()
 transliter = Transliter(academic)
 okt = Okt()
 
+# --- TTS 파일 경로 설정 ---
 TTS_OUTPUT_DIR = "tts_files"
 os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
 app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
+
 render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+BASE_URL = f"https://{render_host}" if render_host else "http://localhost:8000"
 
-if render_host:
-    BASE_URL = f"https://{render_host}"
-else:
-    BASE_URL = "http://localhost:8000"
-
-# --- 헬퍼 함수들 (도우미 함수) ---
-# 한국어 발음 관련 함수 (Input Sentence, Easy Sentence의 Pronunciation)
+# --- 헬퍼 함수들 ---
 def convert_pronunciation_to_roman(sentence: str) -> str:
     korean_pron = g2p(sentence)
     romanized = transliter.translit(korean_pron)
     return romanized
 
-# 텍스트 음성 변환 (TTS) 관련 함수 (Speak API에서 사용)
 def generate_tts(text: str) -> str:
     tts = gTTS(text=text, lang='ko')
     filename = f"{uuid.uuid4()}.mp3"
@@ -99,7 +93,6 @@ def generate_tts(text: str) -> str:
     tts.save(filepath)
     return filename
 
-# 한국어-영어 번역 관련 함수 (English Sentence)
 def translate_korean_to_english(text: str) -> str:
     try:
         translated_text = GoogleTranslator(source='ko', target='en').translate(text)
@@ -108,7 +101,6 @@ def translate_korean_to_english(text: str) -> str:
         print(f"Translation error: {e}")
         return f"Translation error: {e}"
 
-# 키워드 추출 및 사전 정의 관련 함수 (Word Dictionary)
 def extract_keywords(text):
     raw_words = okt.pos(text, stem=True)
     joined_words = []
@@ -119,7 +111,6 @@ def extract_keywords(text):
             skip_next = False
             continue
         word, pos = raw_words[i]
-
         if (
             i + 1 < len(raw_words)
             and pos == 'Noun'
@@ -131,7 +122,6 @@ def extract_keywords(text):
         elif pos in ['Noun', 'Verb', 'Adjective', 'Adverb']:
             joined_words.append((word, pos))
 
-    # 추출된 키워드에서 중복 제거 및 순서 유지
     seen = set()
     ordered_unique = []
     for word, pos in joined_words:
@@ -140,7 +130,6 @@ def extract_keywords(text):
             ordered_unique.append((word, pos))
     return ordered_unique
 
-# 표준국어대사전 API를 통해 단어의 정의를 가져오는 함수
 def get_valid_senses_excluding_pronoun(word, target_pos, max_defs=3):
     pos_map = {
         'Noun': '명사',
@@ -149,7 +138,6 @@ def get_valid_senses_excluding_pronoun(word, target_pos, max_defs=3):
         'Adverb': '부사'
     }
     mapped_pos = pos_map.get(target_pos)
-    
     if not mapped_pos:
         return []
 
@@ -176,13 +164,12 @@ def get_valid_senses_excluding_pronoun(word, target_pos, max_defs=3):
         if sup_no in seen_supnos:
             continue
         seen_supnos.add(sup_no)
+
         sense = item.find('sense')
-        
         if sense is None:
             continue
 
         definition = sense.findtext('definition', default='뜻풀이 없음')
-
         senses.append({
             'pos': pos,
             'definition': definition
@@ -193,7 +180,7 @@ def get_valid_senses_excluding_pronoun(word, target_pos, max_defs=3):
 
     return senses
 
-# --- API 엔드포인트 정의 ---
+# --- API 엔드포인트 ---
 @app.get("/")
 async def read_root():
     return {"message": "서버가 작동 중입니다."}
@@ -227,7 +214,6 @@ async def translate_to_easy_korean(input_data: TextInput):
         )
 
         translated_text = response.choices[0].message.content.strip()
-
         translated_romanized_pronunciation = convert_pronunciation_to_roman(translated_text)
         translated_english_translation = translate_korean_to_english(translated_text)
 
@@ -250,3 +236,11 @@ async def translate_to_easy_korean(input_data: TextInput):
             "translated_english_translation": translated_english_translation,
             "keyword_dictionary": keywords_with_definitions
         })
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# --- FastAPI 실행 코드 (로컬 실행용) ---
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
