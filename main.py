@@ -6,40 +6,22 @@ from gtts import gTTS
 from g2pk import G2p
 from hangul_romanize import Transliter
 from hangul_romanize.rule import academic
-from korean_romanizer.romanizer import Romanizer #
+from korean_romanizer.romanizer import Romanizer # 로마자 표기를 위해 추가
+import uuid
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from deep_translator import GoogleTranslator
-from konlpy.tag import Okt
-import uuid
-import requests
-import xml.etree.ElementTree as ET
-
 
 # --- 환경 변수 설정 ---
 api_key = os.getenv("OPENAI_API_KEY")
-korean_api_key = os.getenv("KOREAN_API_KEY")
 
 if not api_key:
-    raise ValueError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다. API 키를 설정해주세요.")
-if not korean_api_key:
-    raise ValueError("KOREAN_API_KEY 환경 변수가 설정되지 않았습니다. API 키를 설정해주세요.")
+    raise ValueError("API 키를 설정해주세요.")
 
 # --- OpenAI 클라이언트 초기화 ---
 client = OpenAI(api_key=api_key)
 
 # --- FastAPI 앱 초기화 ---
 app = FastAPI()
-
-# --- CORS 설정 ---
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # --- Pydantic 모델 정의 ---
 class TextInput(BaseModel):
@@ -72,148 +54,68 @@ SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가�
 # --- 기존 모듈 초기화 ---
 g2p = G2p()
 transliter = Transliter(academic)
-okt = Okt()
 
+# TTS 음성 파일을 저장할 디렉토리 설정 및 생성
 TTS_OUTPUT_DIR = "tts_files"
 os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
+
+# TTS_OUTPUT_DIR을 /tts 경로로 정적 파일 서빙하도록 설정
 app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
+
+# Render 배포 시 실제 서비스의 기본 URL을 가져오기 위한 환경 변수 활용
 render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-
 if render_host:
-    BASE_URL = f"https://{render_host}"
+    BASE_URL = f"https://{render_host}" # Render에서는 HTTPS 사용
 else:
-    BASE_URL = "http://localhost:8000"
+    BASE_URL = "http://localhost:8000" # 로컬 개발 환경 기본값
 
-# --- 헬퍼 함수들 (도우미 함수) ---
-# 한국어 발음 관련 함수 (Input Sentence, Easy Sentence의 Pronunciation)
+# 한글 발음을 로마자로 변환하는 함수
 def convert_pronunciation_to_roman(sentence: str) -> str:
-    korean_pron = g2p(sentence)
+    korean_pron = g2p(sentence)  # 발음 변환
     romanized = transliter.translit(korean_pron)
     return romanized
 
-# 텍스트 음성 변환 (TTS) 관련 함수 (Speak API에서 사용)
+# TTS 음성 파일을 생성하고 저장하는 함수
 def generate_tts(text: str) -> str:
     tts = gTTS(text=text, lang='ko')
-    filename = f"{uuid.uuid4()}.mp3"
+    filename = f"{uuid.uuid4()}.mp3"  # 고유한 파일명 생성
     filepath = os.path.join(TTS_OUTPUT_DIR, filename)
     tts.save(filepath)
     return filename
 
-# 한국어-영어 번역 관련 함수 (English Sentence)
-def translate_korean_to_english(text: str) -> str:
-    try:
-        translated_text = GoogleTranslator(source='ko', target='en').translate(text)
-        return translated_text
-    except Exception as e:
-        print(f"Translation error: {e}")
-        return f"Translation error: {e}"
-
-# 키워드 추출 및 사전 정의 관련 함수 (Word Dictionary)
-def extract_keywords(text):
-    raw_words = okt.pos(text, stem=True)
-    joined_words = []
-    skip_next = False
-
-    for i in range(len(raw_words)):
-        if skip_next:
-            skip_next = False
-            continue
-        word, pos = raw_words[i]
-
-        if (
-            i + 1 < len(raw_words)
-            and pos == 'Noun'
-            and raw_words[i + 1][0] == '다'
-            and raw_words[i + 1][1] == 'Eomi'
-        ):
-            joined_words.append((word + '다', 'Verb'))
-            skip_next = True
-        elif pos in ['Noun', 'Verb', 'Adjective', 'Adverb']:
-            joined_words.append((word, pos))
-
-    # 추출된 키워드에서 중복 제거 및 순서 유지
-    seen = set()
-    ordered_unique = []
-    for word, pos in joined_words:
-        if word not in seen:
-            seen.add(word)
-            ordered_unique.append((word, pos))
-    return ordered_unique
-
-# 표준국어대사전 API를 통해 단어의 정의를 가져오는 함수
-def get_valid_senses_excluding_pronoun(word, target_pos, max_defs=3):
-    pos_map = {
-        'Noun': '명사',
-        'Verb': '동사',
-        'Adjective': '형용사',
-        'Adverb': '부사'
-    }
-    mapped_pos = pos_map.get(target_pos)
-    
-    if not mapped_pos:
-        return []
-
-    url = "https://stdict.korean.go.kr/api/search.do"
-    params = {
-        'key': korean_api_key,
-        'q': word,
-        'req_type': 'xml'
-    }
-
-    response = requests.get(url, params=params)
-    root = ET.fromstring(response.text)
-
-    senses = []
-    seen_supnos = set()
-
-    for item in root.findall('item'):
-        sup_no = item.findtext('sup_no', default='0')
-        pos = item.findtext('pos', default='')
-
-        if pos == '대명사' or pos != mapped_pos:
-            continue
-
-        if sup_no in seen_supnos:
-            continue
-        seen_supnos.add(sup_no)
-        sense = item.find('sense')
-        
-        if sense is None:
-            continue
-
-        definition = sense.findtext('definition', default='뜻풀이 없음')
-
-        senses.append({
-            'pos': pos,
-            'definition': definition
-        })
-
-        if len(senses) >= max_defs:
-            break
-
-    return senses
-
 # --- API 엔드포인트 정의 ---
+
 @app.get("/")
 async def read_root():
-    return {"message": "서버가 작동 중입니다."}
+    """
+    루트 엔드포인트: 서버가 잘 작동하는지 확인합니다.
+    """
+    return {"message": "SimpleTalk API 서버가 작동 중입니다."}
 
 @app.post("/romanize")
 async def romanize(text: str = Form(...)):
+    """
+    입력된 한국어 문장의 발음을 로마자로 변환하여 반환합니다.
+    """
     romanized = convert_pronunciation_to_roman(text)
     return JSONResponse(content={"input": text, "romanized": romanized})
 
 @app.post("/speak")
 async def speak(text: str = Form(...)):
+    """
+    입력된 한국어 문장의 TTS 음성 파일을 생성하고 해당 URL을 반환합니다.
+    """
     filename = generate_tts(text)
     tts_url = f"{BASE_URL}/tts/{filename}"
     return JSONResponse(content={"tts_url": tts_url})
 
-@app.post("/translate-to-easy-korean")
+@app.post("/translate-to-easy-korean") # 기존에 정의된 이름과 겹치지 않도록 주의
 async def translate_to_easy_korean(input_data: TextInput):
+    """
+    사용자로부터 텍스트를 받아 쉬운 한국어로 번역하고,
+    번역된 텍스트의 로마자 발음 표기를 함께 반환합니다.
+    """
     try:
-        original_romanized_pronunciation = convert_pronunciation_to_roman(input_data.text)
-
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": input_data.text}
@@ -227,30 +129,24 @@ async def translate_to_easy_korean(input_data: TextInput):
         )
 
         translated_text = response.choices[0].message.content.strip()
-
-        translated_romanized_pronunciation = convert_pronunciation_to_roman(translated_text)
-        translated_english_translation = translate_korean_to_english(translated_text)
-
-        keywords_with_definitions = []
-        keywords = extract_keywords(translated_text)
-        for word, pos in keywords:
-            senses = get_valid_senses_excluding_pronoun(word, pos)
-            if senses:
-                keywords_with_definitions.append({
-                    "word": word,
-                    "pos": pos,
-                    "definitions": senses
-                })
+        romanized_pronunciation = Romanizer(translated_text).romanize()
 
         return JSONResponse(content={
             "original_text": input_data.text,
-            "original_romanized_pronunciation": original_romanized_pronunciation,
             "translated_text": translated_text,
-            "translated_romanized_pronunciation": translated_romanized_pronunciation,
-            "translated_english_translation": translated_english_translation,
-            "keyword_dictionary": keywords_with_definitions
+            "romanized_pronunciation": romanized_pronunciation
         })
 
     except Exception as e:
-        print(f"API 처리 중 에러 발생: {e}")
+        print(f"OpenAI API 호출 중 에러 발생: {e}")
         raise HTTPException(status_code=500, detail=f"API 처리 중 에러가 발생했습니다: {str(e)}")
+
+# (선택 사항) TTS 파일 존재 여부 확인 API (디버깅용)
+@app.get("/check_tts_file/{filename}")
+async def check_tts_file(filename: str):
+    """
+    TTS 파일이 서버에 존재하는지 확인합니다. (디버깅용)
+    """
+    filepath = os.path.join(TTS_OUTPUT_DIR, filename)
+    exists = os.path.exists(filepath)
+    return JSONResponse(content={"filename": filename, "exists": exists, "filepath": filepath})
