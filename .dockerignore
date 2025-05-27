@@ -1,0 +1,26 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.env
+.env.local
+.vscode/
+.DS_Store
+*.swp
+*.bak
+*.tmp
+# 개발 환경에서 생성되는 임시 파일이나 로그 파일
+logs/
+tmp/
+
+# Node.js 프로젝트가 함께 있는 경우 (프론트엔드 등)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Python 가상 환경 폴더 (일반적으로 venv 또는 .venv)
+venv/
+.venv/
+
+# Docker 빌드 시 생성된 TTS 파일들이 다시 컨테이너로 복사되지 않도록
+tts_files/
