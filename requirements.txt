@@ -1,0 +1,14 @@
+fastapi
+gtts
+g2pk
+hangul-romanize
+uvicorn
+python-multipart
+korean-romanizer
+openai>=1.0.0
+deep-translator
+konlpy
+deep-translator
+requests
+konlpy
+JPype1
