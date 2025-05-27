@@ -1,5 +1,4 @@
 fastapi
-gtts
 g2pk
 hangul-romanize
 uvicorn
@@ -8,7 +7,7 @@ korean-romanizer
 openai>=1.0.0
 deep-translator
 konlpy
-deep-translator
 requests
-konlpy
 JPype1
+google-cloud-texttospeech # 새로 추가
+google-cloud-storage # 새로 추가
