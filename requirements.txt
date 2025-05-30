@@ -10,3 +10,4 @@ konlpy
 JPype1
 python-dotenv
 googletrans
+hangul_romanize
