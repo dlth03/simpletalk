@@ -4,7 +4,6 @@ openai>=1.0.0
 korean_romanizer
 uvicorn
 python-multipart
-openai
 requests
 konlpy
 JPype1
