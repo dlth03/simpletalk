@@ -11,3 +11,4 @@ JPype1
 python-dotenv
 googletrans
 hangul_romanize
+deep_translator
