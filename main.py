@@ -16,6 +16,7 @@ from konlpy.tag import Okt
 from deep_translator import GoogleTranslator
 
 # --- 환경 변수 설정 ---
+# 실제 환경 변수 (예: .env 파일, 배포 환경 설정)에서 로드됩니다.
 api_key = os.getenv("OPENAI_API_KEY")
 korean_api_key = os.getenv("KOREAN_API_KEY")
 
@@ -77,6 +78,8 @@ TTS_OUTPUT_DIR = "tts_files"
 os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
 app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
 
+# Render 배포 시 실제 호스트명 사용, 로컬 개발 시에는 localhost:8000
+# 이 BASE_URL이 React Native 앱에서 접근 가능한 URL이어야 합니다.
 render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 BASE_URL = f"https://{render_host}" if render_host else "http://localhost:8000"
 
@@ -200,6 +203,10 @@ async def speak(text: str = Form(...)):
 async def translate_to_easy_korean(input_data: TextInput):
     try:
         original_romanized_pronunciation = convert_pronunciation_to_roman(input_data.text)
+        
+        # 원문 문장에 대한 TTS 파일 생성 및 URL 추가
+        original_tts_filename = generate_tts(input_data.text)
+        original_tts_url = f"{BASE_URL}/tts/{original_tts_filename}"
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -207,7 +214,7 @@ async def translate_to_easy_korean(input_data: TextInput):
         ]
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o-mini", # gpt-4o-mini 또는 gpt-3.5-turbo 등 선택
             messages=messages,
             temperature=0.7,
             max_tokens=150
@@ -216,6 +223,11 @@ async def translate_to_easy_korean(input_data: TextInput):
         translated_text = response.choices[0].message.content.strip()
         translated_romanized_pronunciation = convert_pronunciation_to_roman(translated_text)
         translated_english_translation = translate_korean_to_english(translated_text)
+        
+        # 쉬운 문장에 대한 TTS 파일 생성 및 URL
+        easy_tts_filename = generate_tts(translated_text)
+        easy_tts_url = f"{BASE_URL}/tts/{easy_tts_filename}"
+
 
         keywords_with_definitions = []
         keywords = extract_keywords(translated_text)
@@ -231,13 +243,17 @@ async def translate_to_easy_korean(input_data: TextInput):
         return JSONResponse(content={
             "original_text": input_data.text,
             "original_romanized_pronunciation": original_romanized_pronunciation,
+            "original_tts_url": original_tts_url, # 원문 TTS URL 포함
             "translated_text": translated_text,
             "translated_romanized_pronunciation": translated_romanized_pronunciation,
             "translated_english_translation": translated_english_translation,
+            "easy_tts_url": easy_tts_url, # 쉬운 문장 TTS URL
             "keyword_dictionary": keywords_with_definitions
         })
 
     except Exception as e:
+        # 에러 발생 시 로그를 남기고 클라이언트에게 에러 메시지 전달
+        print(f"Error during translation: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 # --- FastAPI 실행 코드 (로컬 실행용) ---
