@@ -1,4 +1,5 @@
 fastapi
+gtts
 g2pk
 openai
 korean_romanizer
