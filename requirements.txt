@@ -1,13 +1,13 @@
-fastapi==0.110.0
-uvicorn==0.27.1
+fastapi
+uvicorn
 
-openai==1.14.3
-gtts==2.3.2
-g2pk==0.10.2
-hangul-romanize==0.1.1
-deep-translator==1.11.4
-konlpy==0.6.0
-requests==2.31.0
+openai
+gtts
+g2pk
+hangul-romanize
+deep-translator
+konlpy
+requests
 
 # 국어사전 API 응답 파싱에 사용
-lxml==5.2.1
+lxml
