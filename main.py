@@ -7,14 +7,15 @@ from g2pk import G2p
 from hangul_romanize import Transliter
 from hangul_romanize.rule import academic
 import uuid
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+
 from deep_translator import GoogleTranslator
+
 import requests
 import xml.etree.ElementTree as ET
 from konlpy.tag import Okt
-import time
 
 # --- 환경 변수 설정 ---
 api_key = os.getenv("OPENAI_API_KEY")
@@ -32,36 +33,18 @@ client = OpenAI(api_key=api_key)
 app = FastAPI()
 
 # --- CORS 설정 ---
+# Render 배포 환경에서는 Render의 프록시 설정에 따라 allow_origins를 "*"로 두는 것이 일반적입니다.
+# 프로덕션 환경에서는 보안을 위해 실제 프론트엔드 도메인으로 제한하는 것을 강력히 권장합니다.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 프로덕션에서는 실제 도메인으로 제한하는 것이 좋습니다
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- TTS 설정 ---
-TTS_OUTPUT_DIR = "tts_files"
-os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
-
-# TTS 파일 정리 함수
-def cleanup_old_tts_files(max_age_hours=24):
-    current_time = time.time()
-    for filename in os.listdir(TTS_OUTPUT_DIR):
-        filepath = os.path.join(TTS_OUTPUT_DIR, filename)
-        if os.path.isfile(filepath):
-            file_age = current_time - os.path.getmtime(filepath)
-            if file_age > (max_age_hours * 3600):
-                try:
-                    os.remove(filepath)
-                except Exception as e:
-                    print(f"파일 삭제 중 에러 발생: {e}")
-
 # --- Pydantic 모델 정의 ---
 class TextInput(BaseModel):
-    text: str
-
-class TTSRequest(BaseModel):
     text: str
 
 # --- 시스템 프롬프트 정의 ---
@@ -93,6 +76,9 @@ g2p = G2p()
 transliter = Transliter(academic)
 okt = Okt()
 
+TTS_OUTPUT_DIR = "tts_files"
+os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
+
 app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
 
 render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
@@ -108,18 +94,11 @@ def convert_pronunciation_to_roman(sentence: str) -> str:
     return romanized
 
 def generate_tts(text: str) -> str:
-    try:
-        tts = gTTS(text=text, lang='ko')
-        filename = f"{uuid.uuid4()}.mp3"
-        filepath = os.path.join(TTS_OUTPUT_DIR, filename)
-        tts.save(filepath)
-        
-        # 오래된 파일 정리
-        cleanup_old_tts_files()
-        
-        return filename
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"TTS 생성 중 에러가 발생했습니다: {str(e)}")
+    tts = gTTS(text=text, lang='ko')
+    filename = f"{uuid.uuid4()}.mp3"
+    filepath = os.path.join(TTS_OUTPUT_DIR, filename)
+    tts.save(filepath)
+    return filename
 
 def translate_korean_to_english(text: str) -> str:
     try:
@@ -223,23 +202,10 @@ async def romanize(text: str = Form(...)):
     return JSONResponse(content={"input": text, "romanized": romanized})
 
 @app.post("/speak")
-async def speak(request: TTSRequest):
-    try:
-        # 로마자 변환
-        romanized = convert_pronunciation_to_roman(request.text)
-        
-        # TTS 파일 생성
-        filename = generate_tts(request.text)
-        
-        # 전체 URL 생성
-        audio_url = f"{BASE_URL}/audio/{filename}"
-        
-        return JSONResponse(content={
-            "audio_url": audio_url,
-            "romanized": romanized
-        })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"TTS 생성 중 에러가 발생했습니다: {str(e)}")
+async def speak(text: str = Form(...)):
+    filename = generate_tts(text)
+    tts_url = f"{BASE_URL}/tts/{filename}"
+    return JSONResponse(content={"tts_url": tts_url})
 
 @app.post("/translate-to-easy-korean")
 async def translate_to_easy_korean(input_data: TextInput):
@@ -287,22 +253,3 @@ async def translate_to_easy_korean(input_data: TextInput):
     except Exception as e:
         print(f"API 처리 중 에러 발생: {e}")
         raise HTTPException(status_code=500, detail=f"API 처리 중 에러가 발생했습니다: {str(e)}")
-
-@app.get("/audio/{filename}")
-async def serve_audio(filename: str):
-    try:
-        filepath = os.path.join(TTS_OUTPUT_DIR, filename)
-        if not os.path.exists(filepath):
-            raise HTTPException(status_code=404, detail="오디오 파일을 찾을 수 없습니다.")
-        
-        return FileResponse(
-            filepath,
-            media_type="audio/mpeg",
-            filename=filename,
-            headers={
-                "Content-Disposition": f"attachment; filename={filename}",
-                "Access-Control-Allow-Origin": "*"
-            }
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"오디오 파일 서빙 중 에러가 발생했습니다: {str(e)}")
