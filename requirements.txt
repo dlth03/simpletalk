@@ -6,7 +6,7 @@ uvicorn
 python-multipart
 openai>=1.0.0
 requests
-konlpy
-JPype1
+# konlpy
+# JPype1
 python-dotenv
 googletrans==4.0.0-rc1
