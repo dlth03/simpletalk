@@ -1,6 +1,6 @@
 fastapi
 g2pk
-openai>=1.0.0
+openai
 korean_romanizer
 uvicorn
 python-multipart
@@ -8,4 +8,4 @@ requests
 konlpy
 JPype1
 python-dotenv
-googletrans-p
+googletrans
