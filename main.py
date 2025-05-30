@@ -1,29 +1,28 @@
 import os
-import uuid
-import requests
-import xml.etree.ElementTree as ET
-from fastapi import FastAPI, Form
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Form, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
 from gtts import gTTS
 from g2pk import G2p
 from hangul_romanize import Transliter
 from hangul_romanize.rule import academic
-from konlpy.tag import Okt
+import uuid
+from fastapi.responses import JSONResponse 
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from deep_translator import GoogleTranslator
+import requests
+import xml.etree.ElementTree as ET
+from konlpy.tag import Okt
 
 # --- 환경 변수 설정 ---
-# 실제 환경 변수 (예: .env 파일, 배포 환경 설정)에서 로드됩니다.
 api_key = os.getenv("OPENAI_API_KEY")
-korean_api_key = os.getenv("KOREAN_API_KEY")
+korean_dict_api_key = os.getenv("KOREAN_DICT_API_KEY")
 
 if not api_key:
     raise ValueError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다. API 키를 설정해주세요.")
-if not korean_api_key:
-    raise ValueError("KOREAN_API_KEY 환경 변수가 설정되지 않았습니다. API 키를 설정해주세요.")
+if not korean_dict_api_key:
+    raise ValueError("KOREAN_DICT_API_KEY 환경 변수가 설정되지 않았습니다. API 키를 설정해주세요.")
 
 # --- OpenAI 클라이언트 초기화 ---
 client = OpenAI(api_key=api_key)
@@ -32,6 +31,8 @@ client = OpenAI(api_key=api_key)
 app = FastAPI()
 
 # --- CORS 설정 ---
+# Render 배포 환경에서는 Render의 프록시 설정에 따라 allow_origins를 "*"로 두는 것이 일반적입니다.
+# 프로덕션 환경에서는 보안을 위해 실제 프론트엔드 도메인으로 제한하는 것을 강력히 권장합니다.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,11 +41,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Pydantic 모델 ---
+# --- Pydantic 모델 정의 ---
 class TextInput(BaseModel):
     text: str
 
-# --- 시스템 프롬프트 ---
+# --- 시스템 프롬프트 정의 ---
 SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가야.
 입력된 문장은 다음을 중복 포함할 수 있어:
 1. 속담 또는 관용어
@@ -68,34 +69,42 @@ SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가�
 질문 형태를 그대로 유지하면서 쉬운 단어로 바꿔.
 예시) 입력 : 국무총리는 어떻게 임명돼? / 출력 : 국무총리는 어떻게 정해?"""
 
-# --- 도우미 모듈 초기화 ---
+# --- 기존 모듈 초기화 ---
 g2p = G2p()
 transliter = Transliter(academic)
 okt = Okt()
 
-# --- TTS 파일 경로 설정 ---
 TTS_OUTPUT_DIR = "tts_files"
 os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
+
 app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
 
-# Render 배포 시 실제 호스트명 사용, 로컬 개발 시에는 localhost:8000
-# 이 BASE_URL이 React Native 앱에서 접근 가능한 URL이어야 합니다.
 render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-BASE_URL = f"https://{render_host}" if render_host else "http://localhost:8000"
+if render_host:
+    BASE_URL = f"https://{render_host}"
+else:
+    BASE_URL = "http://localhost:8000"
+    
+    
+app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
 
 # --- 헬퍼 함수들 ---
+# 한글 문장을 실제 발음 형태로 변환 -> 영문자로 변환 함수수
+
 def convert_pronunciation_to_roman(sentence: str) -> str:
     korean_pron = g2p(sentence)
     romanized = transliter.translit(korean_pron)
     return romanized
 
+# gTTS로 mp3 생성
 def generate_tts(text: str) -> str:
     tts = gTTS(text=text, lang='ko')
     filename = f"{uuid.uuid4()}.mp3"
     filepath = os.path.join(TTS_OUTPUT_DIR, filename)
     tts.save(filepath)
-    return filename
+    return filename  # 저장된 파일 이름만 반환
 
+#한국어 문장 영어로 번역역
 def translate_korean_to_english(text: str) -> str:
     try:
         translated_text = GoogleTranslator(source='ko', target='en').translate(text)
@@ -103,7 +112,8 @@ def translate_korean_to_english(text: str) -> str:
     except Exception as e:
         print(f"Translation error: {e}")
         return f"Translation error: {e}"
-
+    
+#사전 형태소 분석 필터링링
 def extract_keywords(text):
     raw_words = okt.pos(text, stem=True)
     joined_words = []
@@ -113,7 +123,9 @@ def extract_keywords(text):
         if skip_next:
             skip_next = False
             continue
+
         word, pos = raw_words[i]
+
         if (
             i + 1 < len(raw_words)
             and pos == 'Noun'
@@ -146,7 +158,7 @@ def get_valid_senses_excluding_pronoun(word, target_pos, max_defs=3):
 
     url = "https://stdict.korean.go.kr/api/search.do"
     params = {
-        'key': korean_api_key,
+        'key': korean_dict_api_key,
         'q': word,
         'req_type': 'xml'
     }
@@ -173,6 +185,7 @@ def get_valid_senses_excluding_pronoun(word, target_pos, max_defs=3):
             continue
 
         definition = sense.findtext('definition', default='뜻풀이 없음')
+
         senses.append({
             'pos': pos,
             'definition': definition
@@ -183,30 +196,31 @@ def get_valid_senses_excluding_pronoun(word, target_pos, max_defs=3):
 
     return senses
 
-# --- API 엔드포인트 ---
+# --- API 엔드포인트 정의 ---
+
 @app.get("/")
 async def read_root():
-    return {"message": "서버가 작동 중입니다."}
+    return {"message": "SimpleTalk API 서버가 작동 중입니다."}
 
+
+#로마자 출력 
 @app.post("/romanize")
 async def romanize(text: str = Form(...)):
     romanized = convert_pronunciation_to_roman(text)
     return JSONResponse(content={"input": text, "romanized": romanized})
 
+#tts출력력
 @app.post("/speak")
 async def speak(text: str = Form(...)):
-    filename = generate_tts(text)
-    tts_url = f"{BASE_URL}/tts/{filename}"
-    return JSONResponse(content={"tts_url": tts_url})
-
+    filename = generate_tts_file(text)
+    return JSONResponse(content={
+        "tts_url": f"{BASE_URL}/tts/{filename}"
+    })
+#프롬프트 실행
 @app.post("/translate-to-easy-korean")
 async def translate_to_easy_korean(input_data: TextInput):
     try:
         original_romanized_pronunciation = convert_pronunciation_to_roman(input_data.text)
-        
-        # 원문 문장에 대한 TTS 파일 생성 및 URL 추가
-        original_tts_filename = generate_tts(input_data.text)
-        original_tts_url = f"{BASE_URL}/tts/{original_tts_filename}"
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -214,20 +228,17 @@ async def translate_to_easy_korean(input_data: TextInput):
         ]
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini", # gpt-4o-mini 또는 gpt-3.5-turbo 등 선택
+            model="gpt-4o-mini",
             messages=messages,
             temperature=0.7,
             max_tokens=150
         )
 
         translated_text = response.choices[0].message.content.strip()
+
+        # KoreanRomanizer 대신 일관성을 위해 convert_pronunciation_to_roman 함수 재사용
         translated_romanized_pronunciation = convert_pronunciation_to_roman(translated_text)
         translated_english_translation = translate_korean_to_english(translated_text)
-        
-        # 쉬운 문장에 대한 TTS 파일 생성 및 URL
-        easy_tts_filename = generate_tts(translated_text)
-        easy_tts_url = f"{BASE_URL}/tts/{easy_tts_filename}"
-
 
         keywords_with_definitions = []
         keywords = extract_keywords(translated_text)
@@ -243,20 +254,12 @@ async def translate_to_easy_korean(input_data: TextInput):
         return JSONResponse(content={
             "original_text": input_data.text,
             "original_romanized_pronunciation": original_romanized_pronunciation,
-            "original_tts_url": original_tts_url, # 원문 TTS URL 포함
             "translated_text": translated_text,
             "translated_romanized_pronunciation": translated_romanized_pronunciation,
             "translated_english_translation": translated_english_translation,
-            "easy_tts_url": easy_tts_url, # 쉬운 문장 TTS URL
             "keyword_dictionary": keywords_with_definitions
         })
 
     except Exception as e:
-        # 에러 발생 시 로그를 남기고 클라이언트에게 에러 메시지 전달
-        print(f"Error during translation: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
-
-# --- FastAPI 실행 코드 (로컬 실행용) ---
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        print(f"API 처리 중 에러 발생: {e}")
+        raise HTTPException(status_code=500, detail=f"API 처리 중 에러가 발생했습니다: {str(e)}")
