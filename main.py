@@ -210,7 +210,7 @@ async def romanize(text: str = Form(...)):
 #tts출력력
 @app.post("/speak")
 async def speak(text: str = Form(...)):
-    filename = generate_tts_file(text)
+    filename = generate_tts(text)
     return JSONResponse(content={
         "tts_url": f"{BASE_URL}/tts/{filename}"
     })
