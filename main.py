@@ -1,28 +1,34 @@
 import os
+import uuid
 from fastapi import FastAPI, Form, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
-from gtts import gTTS
 from g2pk import G2p
 from hangul_romanize import Transliter
 from hangul_romanize.rule import academic
-import uuid
-from fastapi.responses import JSONResponse 
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
 from deep_translator import GoogleTranslator
 import requests
 import xml.etree.ElementTree as ET
 from konlpy.tag import Okt
 
+# Google Cloud TTS 라이브러리
+from google.cloud import texttospeech
+
 # --- 환경 변수 설정 ---
 api_key = os.getenv("OPENAI_API_KEY")
 korean_dict_api_key = os.getenv("KOREAN_DICT_API_KEY")
+google_credentials = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
 if not api_key:
     raise ValueError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다. API 키를 설정해주세요.")
 if not korean_dict_api_key:
     raise ValueError("KOREAN_DICT_API_KEY 환경 변수가 설정되지 않았습니다. API 키를 설정해주세요.")
+if not google_credentials:
+    raise ValueError("GOOGLE_APPLICATION_CREDENTIALS 환경 변수가 설정되지 않았습니다. 서비스 계정 JSON 파일 경로를 설정해주세요.")
+
 
 # --- OpenAI 클라이언트 초기화 ---
 client = OpenAI(api_key=api_key)
@@ -31,11 +37,9 @@ client = OpenAI(api_key=api_key)
 app = FastAPI()
 
 # --- CORS 설정 ---
-# Render 배포 환경에서는 Render의 프록시 설정에 따라 allow_origins를 "*"로 두는 것이 일반적입니다.
-# 프로덕션 환경에서는 보안을 위해 실제 프론트엔드 도메인으로 제한하는 것을 강력히 권장합니다.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # production에서는 실제 도메인으로 제한 권장
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,6 +59,7 @@ SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가�
 각 항목에 대해 다음과 같이 변환해:
 - 속담/관용어는 그 뜻을 자연스럽게 문장 안에 녹여 설명해
 예시) 입력: 배가 불렀네? / 출력: 지금 가진 걸 당연하게 생각하는 거야?
+예시) 입력: 발 없는 말이 천리간다. / 출력 : 소문은 빠르게 퍼진다.
 - 방언은 표준어로 바꿔.
 예시) 입력: 니 오늘 뭐하노? / 출력: 너 오늘 뭐 해?
 입력 : 정구지 / 출력 : 부추
@@ -74,125 +79,66 @@ g2p = G2p()
 transliter = Transliter(academic)
 okt = Okt()
 
+# --- TTS 파일 저장 디렉터리 설정 (필요 시 캐시용으로 사용) ---
 TTS_OUTPUT_DIR = "tts_files"
 os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
-
+# (StaticFiles 마운트는 URL 형태가 필요할 때를 대비해 두지만,
+#  /speak에서는 사용하지 않습니다.)
 app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
 
+# 배포 환경 호스트네임 (이제 /tts URL을 쓰지 않으므로 크게 중요하지 않음)
 render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 if render_host:
     BASE_URL = f"https://{render_host}"
 else:
     BASE_URL = "http://localhost:8000"
-    
-    
+
+
 # --- 헬퍼 함수들 ---
-# 한글 문장을 실제 발음 형태로 변환 -> 영문자로 변환 함수수
 
 def convert_pronunciation_to_roman(sentence: str) -> str:
     korean_pron = g2p(sentence)
     romanized = transliter.translit(korean_pron)
     return romanized
 
-# gTTS로 mp3 생성
-def generate_tts(text: str) -> str:
-    tts = gTTS(text=text, lang='ko')
-    filename = f"{uuid.uuid4()}.mp3"
-    filepath = os.path.join(TTS_OUTPUT_DIR, filename)
-    tts.save(filepath)
-    return filename  # 저장된 파일 이름만 반환
 
-#한국어 문장 영어로 번역역
-def translate_korean_to_english(text: str) -> str:
+def generate_tts_to_file(text: str) -> str | None:
+    """
+    Google Cloud TTS를 사용하여 'text'를 mp3 파일로 생성하고,
+    TTS_OUTPUT_DIR에 저장한 뒤 파일 경로를 반환합니다.
+    실패 시 None을 반환합니다.
+    """
     try:
-        translated_text = GoogleTranslator(source='ko', target='en').translate(text)
-        return translated_text
+        # 클라이언트 초기화 (환경 변수 GOOGLE_APPLICATION_CREDENTIALS 필요)
+        tts_client = texttospeech.TextToSpeechClient()
+
+        synthesis_input = texttospeech.SynthesisInput(text=text)
+        voice = texttospeech.VoiceSelectionParams(
+            language_code="ko-KR",
+            name="ko-KR-Wavenet-A",
+            ssml_gender=texttospeech.SsmlVoiceGender.FEMALE
+        )
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3
+        )
+
+        response = tts_client.synthesize_speech(
+            input=synthesis_input,
+            voice=voice,
+            audio_config=audio_config
+        )
+
+        filename = f"{uuid.uuid4()}.mp3"
+        filepath = os.path.join(TTS_OUTPUT_DIR, filename)
+        with open(filepath, "wb") as f:
+            f.write(response.audio_content)
+
+        return filepath
+
     except Exception as e:
-        print(f"Translation error: {e}")
-        return f"Translation error: {e}"
-    
-#사전 형태소 분석 필터링링
-def extract_keywords(text):
-    raw_words = okt.pos(text, stem=True)
-    joined_words = []
-    skip_next = False
+        print(f"[generate_tts_to_file] GC TTS 예외: {e}")
+        return None
 
-    for i in range(len(raw_words)):
-        if skip_next:
-            skip_next = False
-            continue
-
-        word, pos = raw_words[i]
-
-        if (
-            i + 1 < len(raw_words)
-            and pos == 'Noun'
-            and raw_words[i + 1][0] == '다'
-            and raw_words[i + 1][1] == 'Eomi'
-        ):
-            joined_words.append((word + '다', 'Verb'))
-            skip_next = True
-        elif pos in ['Noun', 'Verb', 'Adjective', 'Adverb']:
-            joined_words.append((word, pos))
-
-    seen = set()
-    ordered_unique = []
-    for word, pos in joined_words:
-        if word not in seen:
-            seen.add(word)
-            ordered_unique.append((word, pos))
-    return ordered_unique
-
-def get_valid_senses_excluding_pronoun(word, target_pos, max_defs=3):
-    pos_map = {
-        'Noun': '명사',
-        'Verb': '동사',
-        'Adjective': '형용사',
-        'Adverb': '부사'
-    }
-    mapped_pos = pos_map.get(target_pos)
-    if not mapped_pos:
-        return []
-
-    url = "https://stdict.korean.go.kr/api/search.do"
-    params = {
-        'key': korean_dict_api_key,
-        'q': word,
-        'req_type': 'xml'
-    }
-
-    response = requests.get(url, params=params)
-    root = ET.fromstring(response.text)
-
-    senses = []
-    seen_supnos = set()
-
-    for item in root.findall('item'):
-        sup_no = item.findtext('sup_no', default='0')
-        pos = item.findtext('pos', default='')
-
-        if pos == '대명사' or pos != mapped_pos:
-            continue
-
-        if sup_no in seen_supnos:
-            continue
-        seen_supnos.add(sup_no)
-
-        sense = item.find('sense')
-        if sense is None:
-            continue
-
-        definition = sense.findtext('definition', default='뜻풀이 없음')
-
-        senses.append({
-            'pos': pos,
-            'definition': definition
-        })
-
-        if len(senses) >= max_defs:
-            break
-
-    return senses
 
 # --- API 엔드포인트 정의 ---
 
@@ -201,20 +147,37 @@ async def read_root():
     return {"message": "SimpleTalk API 서버가 작동 중입니다."}
 
 
-#로마자 출력 
 @app.post("/romanize")
 async def romanize(text: str = Form(...)):
     romanized = convert_pronunciation_to_roman(text)
     return JSONResponse(content={"input": text, "romanized": romanized})
 
-#tts출력력
+
 @app.post("/speak")
 async def speak(text: str = Form(...)):
-    filename = generate_tts(text)
-    return JSONResponse(content={
-        "tts_url": f"{BASE_URL}/tts/{filename}"
-    })
-#프롬프트 실행
+    """
+    Form으로 들어온 'text'를 Google Cloud TTS로 mp3 파일로 생성한 뒤,
+    해당 파일의 바이트를 StreamingResponse로 바로 스트리밍하여 반환합니다.
+    실패 시 503(Service Unavailable)을 반환합니다.
+    """
+    # 1) TTS 파일을 생성하고 로컬 경로를 받아옴
+    mp3_path = generate_tts_to_file(text)
+    if mp3_path is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "TTS 서버 일시 장애로 음성 생성 실패"}
+        )
+
+    # 2) 생성된 파일을 StreamingResponse로 스트리밍
+    def iterfile():
+        with open(mp3_path, "rb") as audio_file:
+            while chunk := audio_file.read(4096):
+                yield chunk
+        # (선택) 재생 후 파일을 삭제하고 싶으면 여기서 os.remove(mp3_path)를 호출
+
+    return StreamingResponse(iterfile(), media_type="audio/mpeg")
+
+
 @app.post("/translate-to-easy-korean")
 async def translate_to_easy_korean(input_data: TextInput):
     try:
@@ -233,8 +196,6 @@ async def translate_to_easy_korean(input_data: TextInput):
         )
 
         translated_text = response.choices[0].message.content.strip()
-
-        # KoreanRomanizer 대신 일관성을 위해 convert_pronunciation_to_roman 함수 재사용
         translated_romanized_pronunciation = convert_pronunciation_to_roman(translated_text)
         translated_english_translation = translate_korean_to_english(translated_text)
 
