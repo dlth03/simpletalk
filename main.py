@@ -86,8 +86,6 @@ else:
     BASE_URL = "http://localhost:8000"
     
     
-app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
-
 # --- 헬퍼 함수들 ---
 # 한글 문장을 실제 발음 형태로 변환 -> 영문자로 변환 함수수
 
