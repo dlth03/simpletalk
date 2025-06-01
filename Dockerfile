@@ -1,4 +1,4 @@
-FROM python:3.9
+FROM python:3.10
 
 # apt 캐시 업데이트
 RUN apt-get update
