@@ -194,7 +194,7 @@ def get_valid_senses_excluding_pronoun(word: str, target_pos: str, max_defs: int
             break
     return senses
 
-def generate_tts_to_file(text: str) -> str | None:
+def generate_tts_to_file(text: str) -> str :
     """
     Google Cloud TTS를 사용하여 text를 mp3로 합성한 뒤,
     TTS_OUTPUT_DIR에 저장하고, 해당 파일 경로를 반환합니다.
