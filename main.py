@@ -1,7 +1,7 @@
 import os
 import uuid
 from fastapi import FastAPI, Form, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -28,7 +28,6 @@ if not korean_dict_api_key:
     raise ValueError("KOREAN_DICT_API_KEY 환경 변수가 설정되지 않았습니다. API 키를 설정해주세요.")
 if not google_credentials:
     raise ValueError("GOOGLE_APPLICATION_CREDENTIALS 환경 변수가 설정되지 않았습니다. 서비스 계정 JSON 파일 경로를 설정해주세요.")
-
 
 # --- OpenAI 클라이언트 초기화 ---
 client = OpenAI(api_key=api_key)
@@ -79,20 +78,18 @@ g2p = G2p()
 transliter = Transliter(academic)
 okt = Okt()
 
-# --- TTS 파일 저장 디렉터리 설정 (필요 시 캐시용으로 사용) ---
+# --- TTS 파일 저장 디렉터리 설정 (임시 저장용) ---
 TTS_OUTPUT_DIR = "tts_files"
 os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
-# (StaticFiles 마운트는 URL 형태가 필요할 때를 대비해 두지만,
-#  /speak에서는 사용하지 않습니다.)
+# StaticFiles 마운트는 예비 용도
 app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
 
-# 배포 환경 호스트네임 (이제 /tts URL을 쓰지 않으므로 크게 중요하지 않음)
+# 배포 환경 호스트네임 (예: Render)
 render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 if render_host:
     BASE_URL = f"https://{render_host}"
 else:
     BASE_URL = "http://localhost:8000"
-
 
 # --- 헬퍼 함수들 ---
 
@@ -101,17 +98,98 @@ def convert_pronunciation_to_roman(sentence: str) -> str:
     romanized = transliter.translit(korean_pron)
     return romanized
 
+def translate_korean_to_english(text: str) -> str:
+    try:
+        return GoogleTranslator(source='ko', target='en').translate(text)
+    except Exception as e:
+        print(f"Translation error: {e}")
+        return f"Translation error: {e}"
+
+def extract_keywords(text: str):
+    raw_words = okt.pos(text, stem=True)
+    joined_words = []
+    skip_next = False
+
+    for i in range(len(raw_words)):
+        if skip_next:
+            skip_next = False
+            continue
+
+        word, pos = raw_words[i]
+        if (
+            i + 1 < len(raw_words)
+            and pos == 'Noun'
+            and raw_words[i + 1][0] == '다'
+            and raw_words[i + 1][1] == 'Eomi'
+        ):
+            joined_words.append((word + '다', 'Verb'))
+            skip_next = True
+        elif pos in ['Noun', 'Verb', 'Adjective', 'Adverb']:
+            joined_words.append((word, pos))
+
+    seen = set()
+    ordered_unique = []
+    for word, pos in joined_words:
+        if word not in seen:
+            seen.add(word)
+            ordered_unique.append((word, pos))
+    return ordered_unique
+
+def get_valid_senses_excluding_pronoun(word: str, target_pos: str, max_defs: int = 3):
+    pos_map = {
+        'Noun': '명사',
+        'Verb': '동사',
+        'Adjective': '형용사',
+        'Adverb': '부사'
+    }
+    mapped_pos = pos_map.get(target_pos)
+    if not mapped_pos:
+        return []
+
+    url = "https://stdict.korean.go.kr/api/search.do"
+    params = {
+        'key': korean_dict_api_key,
+        'q': word,
+        'req_type': 'xml'
+    }
+
+    response = requests.get(url, params=params)
+    root = ET.fromstring(response.text)
+
+    senses = []
+    seen_supnos = set()
+
+    for item in root.findall('item'):
+        sup_no = item.findtext('sup_no', default='0')
+        pos = item.findtext('pos', default='')
+
+        if pos == '대명사' or pos != mapped_pos:
+            continue
+        if sup_no in seen_supnos:
+            continue
+        seen_supnos.add(sup_no)
+
+        sense = item.find('sense')
+        if sense is None:
+            continue
+        definition = sense.findtext('definition', default='뜻풀이 없음')
+
+        senses.append({
+            'pos': pos,
+            'definition': definition
+        })
+        if len(senses) >= max_defs:
+            break
+
+    return senses
 
 def generate_tts_to_file(text: str) -> str | None:
     """
-    Google Cloud TTS를 사용하여 'text'를 mp3 파일로 생성하고,
-    TTS_OUTPUT_DIR에 저장한 뒤 파일 경로를 반환합니다.
-    실패 시 None을 반환합니다.
+    Google Cloud TTS를 사용하여 'text'를 mp3로 합성하고,
+    TTS_OUTPUT_DIR에 저장한 뒤 파일 경로 반환. 실패 시 None.
     """
     try:
-        # 클라이언트 초기화 (환경 변수 GOOGLE_APPLICATION_CREDENTIALS 필요)
         tts_client = texttospeech.TextToSpeechClient()
-
         synthesis_input = texttospeech.SynthesisInput(text=text)
         voice = texttospeech.VoiceSelectionParams(
             language_code="ko-KR",
@@ -139,28 +217,23 @@ def generate_tts_to_file(text: str) -> str | None:
         print(f"[generate_tts_to_file] GC TTS 예외: {e}")
         return None
 
-
 # --- API 엔드포인트 정의 ---
 
 @app.get("/")
 async def read_root():
     return {"message": "SimpleTalk API 서버가 작동 중입니다."}
 
-
 @app.post("/romanize")
 async def romanize(text: str = Form(...)):
     romanized = convert_pronunciation_to_roman(text)
     return JSONResponse(content={"input": text, "romanized": romanized})
 
-
 @app.post("/speak")
 async def speak(text: str = Form(...)):
     """
-    Form으로 들어온 'text'를 Google Cloud TTS로 mp3 파일로 생성한 뒤,
-    해당 파일의 바이트를 StreamingResponse로 바로 스트리밍하여 반환합니다.
-    실패 시 503(Service Unavailable)을 반환합니다.
+    Form으로 들어온 'text'를 Google Cloud TTS로 mp3 합성 → 
+    StreamingResponse로 MP3 바이트 스트리밍. 실패 시 503 반환.
     """
-    # 1) TTS 파일을 생성하고 로컬 경로를 받아옴
     mp3_path = generate_tts_to_file(text)
     if mp3_path is None:
         return JSONResponse(
@@ -168,15 +241,13 @@ async def speak(text: str = Form(...)):
             content={"error": "TTS 서버 일시 장애로 음성 생성 실패"}
         )
 
-    # 2) 생성된 파일을 StreamingResponse로 스트리밍
     def iterfile():
         with open(mp3_path, "rb") as audio_file:
             while chunk := audio_file.read(4096):
                 yield chunk
-        # (선택) 재생 후 파일을 삭제하고 싶으면 여기서 os.remove(mp3_path)를 호출
+        # 재생 이후 파일 삭제: os.remove(mp3_path)
 
     return StreamingResponse(iterfile(), media_type="audio/mpeg")
-
 
 @app.post("/translate-to-easy-korean")
 async def translate_to_easy_korean(input_data: TextInput):
