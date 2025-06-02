@@ -58,7 +58,7 @@ client = OpenAI(api_key=api_key)
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # 배포 시 실제 도메인으로 제한 권장
+    allow_origins=["*"],    # 배포 시 실제 도메인으로 제한 권장
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -145,6 +145,13 @@ def extract_keywords(text: str):
             skip_next = False
             continue
         word, pos = raw_words[i]
+
+        # === '아주'에 대한 품사 강제 변경 로직 추가 ===
+        # '아주'가 명사로 잘못 분류되는 경우를 처리
+        if word == '아주' and pos == 'Noun':
+            pos = 'Adverb' # '명사'로 분류된 '아주'를 '부사'로 변경
+        # =============================================
+
         if (
             i + 1 < len(raw_words)
             and pos == "Noun"
@@ -284,7 +291,7 @@ async def translate_to_easy_korean(input_data: TextInput):
         translated_english_translation = translate_korean_to_english(translated_text)
 
         keywords_with_definitions = []
-        keywords = extract_keywords(translated_text)
+        keywords = extract_keywords(translated_text) # 여기서 품사 수정 로직이 적용됨
         for word, pos in keywords:
             senses = get_valid_senses_excluding_pronoun(word, pos)
             if senses:
