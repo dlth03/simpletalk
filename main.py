@@ -305,4 +305,3 @@ async def translate_to_easy_korean(input_data: TextInput):
     except Exception as e:
         print(f"[translate-to-easy-korean] API 처리 중 에러: {e}")
         raise HTTPException(status_code=500, detail=f"API 처리 중 에러가 발생했습니다: {e}")
-main
