@@ -24,8 +24,8 @@ from google.cloud import texttospeech
 # ==========================================
 creds_env = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 if creds_env:
-    # JSON 문자열인지 확인 (앞이 "{" 로 시작하면 JSON 포맷)
     if creds_env.strip().startswith("{"):
+        # JSON 문자열이면 임시 파일로 저장
         fd, temp_path = tempfile.mkstemp(suffix=".json")
         with os.fdopen(fd, "w") as f:
             f.write(creds_env)
@@ -58,7 +58,7 @@ client = OpenAI(api_key=api_key)
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 프로덕션에서는 실제 도메인으로 제한 권장
+    allow_origins=["*"],   # 배포 시 실제 도메인으로 제한 권장
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -82,6 +82,7 @@ SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가�
 각 항목에 대해 다음과 같이 변환해:
 - 속담/관용어: 그 뜻을 자연스럽게 문장 안에 설명
   예시) 입력: 배가 불렀네? / 출력: 지금 가진 걸 당연하게 생각하는 거야?
+  예시) 입력: 발 없는 말이 천리간다. / 출력: 소문은 빠르게 퍼진다.
 - 방언: 표준어로 바꾸기
   예시) 입력: 니 오늘 뭐하노? / 출력: 너 오늘 뭐 해?
   입력: 정구지 / 출력: 부추
@@ -93,9 +94,8 @@ SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가�
 다음은 반드시 지켜야 함:
 - 변환된 문장 또는 단어만 출력
 - 설명 덧붙이지 않기
-- 의문문이 들어오면, 절대 대답하지 않기
-질문형은 그대로 유지하면서 쉬운 단어로 바꾸기.
-예시) 입력: 국무총리는 어떻게 임명돼? / 출력: 국무총리는 어떻게 정해?"""
+- 의문문을 그대로 질문 형태로 유지하면서 쉬운 단어로 바꾸기
+  예시) 입력: 국무총리는 어떻게 임명돼? / 출력: 국무총리는 어떻게 정해?"""
 
 # ==========================================
 # 7) 기존 모듈 초기화 (g2pk, hangul-romanize, Okt 등)
@@ -109,7 +109,8 @@ okt = Okt()
 # ==========================================
 TTS_OUTPUT_DIR = "tts_files"
 os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
-# 이 경로에 생성된 mp3 파일이 /tts/ 엔드포인트를 통해 서빙됨
+
+# 여기서 “tts_files/” 내부의 MP3 파일들을 /tts/ 경로로 서빙
 app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
 
 # 배포 환경 호스트네임 (예: Render)
@@ -245,9 +246,9 @@ async def romanize(text: str = Form(...)):
 @app.post("/speak")
 async def speak(text: str = Form(...)):
     """
-    Form으로 들어온 'text'를 Google Cloud TTS로 합성하여 mp3 파일을 생성 → 
+    Form으로 들어온 'text'를 Google Cloud TTS로 합성하여 mp3 파일을 생성 →
     그 파일의 정적 URL(tts_url)을 JSON으로 반환합니다.
-    (StreamingResponse가 아니라, URL만 내려주는 방식)
+    (바로 StreamingResponse를 보내는 대신, URL만 내려주는 방식)
     실패 시 503 반환.
     """
     mp3_path = generate_tts_to_file(text)
