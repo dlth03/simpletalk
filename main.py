@@ -14,6 +14,7 @@ from deep_translator import GoogleTranslator
 import requests
 import xml.etree.ElementTree as ET
 from konlpy.tag import Okt
+from bs4 import BeautifulSoup # <-- 새로 추가된 임포트
 
 # Google Cloud TTS 라이브러리
 from google.cloud import texttospeech
@@ -40,7 +41,7 @@ else:
 # 2) 나머지 환경 변수 확인
 # ==========================================
 api_key = os.getenv("OPENAI_API_KEY")
-korean_dict_api_key = os.getenv("KOREAN_DICT_API_KEY")
+korean_dict_api_key = os.getenv("KOREAN_DICT_API_KEY") # <-- 기존 API 키 변수
 
 if not api_key:
     raise ValueError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
@@ -87,7 +88,7 @@ SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가�
   예시) 입력: 니 오늘 뭐하노? / 출력: 너 오늘 뭐 해?
   입력: 정구지 / 출력: 부추
 - 어려운 단어: 초등 1~2학년도 이해할 수 있는 쉬운 말로 바꾸기
-  예시) 입력: 당신의 요청은 거절되었습니다. 추가 서류를 제출하세요. 
+  예시) 입력: 당신의 요청은 거절되었습니다. 추가 서류를 제출하세요.
         / 출력: 당신의 요청은 안 됩니다. 서류를 더 내야 합니다.
 - 줄임말: 풀어쓴 문장으로 바꾸기
   예시) 입력: 할많하않 / 출력: 할 말은 많지만 하지 않겠어
@@ -102,7 +103,27 @@ SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가�
 # ==========================================
 g2p = G2p()
 transliter = Transliter(academic)
-okt = Okt()
+okt = Okt() # Okt는 이미 존재하므로 중복 초기화 방지
+
+# 새로 추가된 품사 매핑
+okt_to_nine_pos = {
+    "Noun": "명사",
+    "Pronoun": "대명사",
+    "Number": "수사",
+    "Verb": "동사",
+    "Adjective": "형용사",
+    "Adverb": "부사",
+    "Exclamation": "감탄사",
+    "Determiner": "관형사",
+    "Conjunction": "부사",      # 전통 문법상 부사 취급
+    "Foreign": "명사",          # 외래어는 명사 취급
+    "Alpha": "명사",            # 알파벳도 명사 취급
+    "Josa": None,
+    "Eomi": None,
+    "PreEomi": None,
+    "Modifier": None,
+    "Punctuation": None,
+}
 
 # ==========================================
 # 8) TTS 파일 저장 디렉터리 및 StaticFiles 마운트
@@ -121,7 +142,7 @@ else:
     BASE_URL = "http://localhost:8000"
 
 # ==========================================
-# 9) 헬퍼 함수들
+# 9) 헬퍼 함수들 (수정 및 추가)
 # ==========================================
 def convert_pronunciation_to_roman(sentence: str) -> str:
     korean_pron = g2p(sentence)
@@ -135,71 +156,96 @@ def translate_korean_to_english(text: str) -> str:
         print(f"[Translation error] {e}")
         return f"Translation error: {e}"
 
-def extract_keywords(text: str):
-    raw_words = okt.pos(text, stem=True)
-    joined_words = []
-    skip_next = False
+# 1. 문장에서 단어를 9품사 기준으로 추출 (기존 extract_keywords 대체)
+def extract_words_9pos(sentence: str):
+    words = okt.pos(sentence, stem=True)
+    result = []
+    for word, tag in words:
+        pos = okt_to_nine_pos.get(tag)
+        # '아주'에 대한 품사 강제 변경 로직은 여기서는 필요 없음.
+        # 기존 extract_keywords에서 '아주' 로직은 Noun -> Adverb 변경이었는데,
+        # 새로운 okt_to_nine_pos 맵은 'Adverb'를 '부사'로 매핑하므로 
+        # '아주'가 Adverb로 나오면 자동 처리됨.
+        # 만약 '아주'가 Noun으로 나올 경우를 대비한 추가 로직은 필요시 여기에 넣을 수 있음.
+        if word == '아주' and pos == '명사': # Okt가 '아주'를 명사로 잘못 분류하는 경우
+            pos = '부사' # '명사'로 분류된 '아주'를 '부사'로 변경
 
-    for i in range(len(raw_words)):
-        if skip_next:
-            skip_next = False
-            continue
-        word, pos = raw_words[i]
-
-        # === '아주'에 대한 품사 강제 변경 로직 추가 ===
-        # '아주'가 명사로 잘못 분류되는 경우를 처리
-        if word == '아주' and pos == 'Noun':
-            pos = 'Adverb' # '명사'로 분류된 '아주'를 '부사'로 변경
-        # =============================================
-
-        if (
-            i + 1 < len(raw_words)
-            and pos == "Noun"
-            and raw_words[i + 1][0] == "다"
-            and raw_words[i + 1][1] == "Eomi"
-        ):
-            joined_words.append((word + "다", "Verb"))
-            skip_next = True
-        elif pos in ["Noun", "Verb", "Adjective", "Adverb"]:
-            joined_words.append((word, pos))
-
+        if pos:
+            result.append((word, pos))
+    # 중복 제거 및 리스트 반환
+    # Set을 바로 반환하면 순서가 보장되지 않으므로, 원래의 로직처럼 중복 제거 후 순서 유지
     seen = set()
     ordered_unique = []
-    for w, p in joined_words:
-        if w not in seen:
-            seen.add(w)
-            ordered_unique.append((w, p))
-    return ordered_unique
+    for w, p in result:
+        if (w,p) not in seen: # (단어, 품사) 쌍으로 중복 제거
+            seen.add((w,p))
+            ordered_unique.append((w,p))
+    return ordered_unique # 중복 제거된 (단어, 품사) 튜플 리스트
 
-def get_valid_senses_excluding_pronoun(word: str, target_pos: str, max_defs: int = 3):
-    pos_map = {"Noun": "명사", "Verb": "동사", "Adjective": "형용사", "Adverb": "부사"}
-    mapped_pos = pos_map.get(target_pos)
-    if not mapped_pos:
+# 2. 조건에 따라 여러 품사를 허용하도록 수정 (기존 get_valid_senses_excluding_pronoun 대체)
+def get_word_info_filtered(word: str):
+    url = "https://stdict.korean.go.kr/api/search.do"
+    params = {
+        "key": korean_dict_api_key, # <-- API_KEY 대신 환경 변수 이름 사용
+        "q": word,
+        "req_type": "xml"
+    }
+
+    response = requests.get(url, params=params)
+    if response.status_code != 200:
+        print(f"[ERROR] 국어사전 API 요청 실패: {response.status_code}, {response.text}")
         return []
 
-    url = "https://stdict.korean.go.kr/api/search.do"
-    params = {"key": korean_dict_api_key, "q": word, "req_type": "xml"}
-    response = requests.get(url, params=params)
-    root = ET.fromstring(response.text)
+    soup = BeautifulSoup(response.content, "xml")
+    items = soup.find_all("item")
 
-    senses = []
+    entries = []
+    for item in items:
+        definition = item.find("definition")
+        pos_tag = item.find("pos")
+        sup_no = item.find("sup_no") # sup_no도 중복 제거에 활용
+
+        # 품사 태그가 없거나 '품사 없음'인 경우 제외
+        if pos_tag is None:
+            continue
+        pos_text = pos_tag.text.strip()
+        if pos_text == "" or pos_text == "품사 없음":
+            continue
+
+        # 뜻풀이가 없으면 제외
+        if definition is None or not definition.text.strip():
+            continue
+
+        definition_text = definition.text.strip()
+        sup_no_text = sup_no.text.strip() if sup_no else ""
+
+        entries.append({
+            "sup_no": sup_no_text, # 중복 제거를 위해 sup_no 추가
+            "pos": pos_text, # '품사' 대신 'pos'로 통일
+            "definition": definition_text # '뜻풀이' 대신 'definition'으로 통일
+        })
+    
+    # sup_no를 기준으로 중복 제거 (get_valid_senses_excluding_pronoun의 로직과 유사)
     seen_supnos = set()
-    for item in root.findall("item"):
-        sup_no = item.findtext("sup_no", default="0")
-        pos = item.findtext("pos", default="")
-        if pos == "대명사" or pos != mapped_pos:
-            continue
-        if sup_no in seen_supnos:
-            continue
-        seen_supnos.add(sup_no)
-        sense = item.find("sense")
-        if sense is None:
-            continue
-        definition = sense.findtext("definition", default="뜻풀이 없음")
-        senses.append({"pos": pos, "definition": definition})
-        if len(senses) >= max_defs:
-            break
-    return senses
+    unique_entries = []
+    for entry in entries:
+        if entry["sup_no"] not in seen_supnos:
+            seen_supnos.add(entry["sup_no"])
+            unique_entries.append(entry)
+
+    # 명사는 뒤로 밀기 (대명사도 명사에 포함/ 만약 대명사가 존재할시 대명사 우선 출력)
+    # 기존 코드에서 대명사 우선 출력을 명시했지만, 명사를 뒤로 미는 로직과 상충됨.
+    # 대명사를 '명사'로 처리하고 명사 뒤로 미는 로직에 포함시키는 것이 더 자연스럽습니다.
+    # 만약 '대명사' 품사를 명사보다 우선하고 싶다면, 정렬 로직을 더 복잡하게 만들어야 합니다.
+    # 여기서는 제공해주신 코드의 '명사는 뒤로 밀기' 로직을 따르겠습니다.
+    # 즉, 대명사도 명사로 간주하여 뒤로 밀림.
+    sorted_entries = sorted(unique_entries, key=lambda x: 1 if x["pos"] == "명사" else 0)
+
+    if not sorted_entries:
+        return []
+
+    return sorted_entries[:4] # 출력할 양 조절(현재 4개 이하로 출력되도록 설정)
+
 
 def generate_tts_to_file(text: str) -> str :
     """
@@ -291,14 +337,20 @@ async def translate_to_easy_korean(input_data: TextInput):
         translated_english_translation = translate_korean_to_english(translated_text)
 
         keywords_with_definitions = []
-        keywords = extract_keywords(translated_text) # 여기서 품사 수정 로직이 적용됨
-        for word, pos in keywords:
-            senses = get_valid_senses_excluding_pronoun(word, pos)
+        # 변경된 extract_words_9pos 함수 사용
+        keywords = extract_words_9pos(translated_text) # (단어, 품사) 튜플의 리스트
+        for word, pos_tag in keywords: # pos_tag는 이제 한글 품사입니다. (명사, 동사 등)
+            # 변경된 get_word_info_filtered 함수 사용
+            senses = get_word_info_filtered(word) # 이 함수는 이미 필터링 및 정렬을 수행함
+
             if senses:
+                # get_word_info_filtered의 반환 형식에 맞춰 조정
+                # 각 sense는 'pos'와 'definition' 키를 가짐
+                formatted_senses = [{"pos": s["pos"], "definition": s["definition"]} for s in senses]
                 keywords_with_definitions.append({
                     "word": word,
-                    "pos": pos,
-                    "definitions": senses,
+                    "pos": pos_tag, # extract_words_9pos에서 가져온 품사 유지
+                    "definitions": formatted_senses,
                 })
 
         return JSONResponse(content={
@@ -311,5 +363,7 @@ async def translate_to_easy_korean(input_data: TextInput):
         })
 
     except Exception as e:
+        import traceback # 예외 발생 시 전체 스택 트레이스 출력
+        traceback.print_exc()
         print(f"[translate-to-easy-korean] API 처리 중 에러: {e}")
         raise HTTPException(status_code=500, detail=f"API 처리 중 에러가 발생했습니다: {e}")
