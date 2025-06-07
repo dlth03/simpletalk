@@ -6,10 +6,9 @@ google-cloud-texttospeech
 g2pk
 hangul-romanize
 deep-translator
-konlpy
 requests
 beautifulsoup4
-jpype1
+
 
 # 국어사전 API 응답 파싱에 사용
 lxml
