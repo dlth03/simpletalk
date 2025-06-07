@@ -1,21 +1,26 @@
-# Dockerfile
 FROM python:3.10
-ENV DEBIAN_FRONTEND=noninteractive
 
-# apt 캐시 업데이트 및 초기 정리 (더 이상 openjdk 설치 필요 없으므로 간소화)
-RUN apt-get update -y && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# apt 캐시 업데이트
+RUN apt-get update
 
-# 더 이상 OpenJDK 설치 및 JAVA_HOME 설정 필요 없음.
+# OpenJDK 17 설치 및 불필요한 패키지 제거, apt 캐시 정리
+RUN apt-get install -y --no-install-recommends openjdk-17-jdk ca-certificates-java \
+    && apt-get autoremove -y \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# JAVA_HOME 환경 변수 설정 (경로 변경!)
+ENV JAVA_HOME /usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH $PATH:$JAVA_HOME/bin
 
 # 작업 디렉토리 설정
 WORKDIR /app
 
-# TTS 파일을 저장할 디렉토리 생성
-RUN mkdir -p tts_files
-
-# Python 의존성 설치 (kiwi 포함, requirements.txt에 있는 모든 패키지 설치)
+# Python 의존성 설치
 COPY requirements.txt .
+
+# TTS 파일을 저장할 디렉토리 생성 (컨테이너 내부에서 gTTS가 파일 생성할 공간)
+RUN mkdir -p tts_files
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
