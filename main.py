@@ -13,9 +13,8 @@ from hangul_romanize.rule import academic
 from deep_translator import GoogleTranslator
 import requests
 import xml.etree.ElementTree as ET
-from bs4 import BeautifulSoup
-import time
-from kiwipiepy import Kiwi
+from konlpy.tag import Okt
+from bs4 import BeautifulSoup # <-- 새로 추가된 임포트
 
 # Google Cloud TTS 라이브러리
 from google.cloud import texttospeech
@@ -42,7 +41,7 @@ else:
 # 2) 나머지 환경 변수 확인
 # ==========================================
 api_key = os.getenv("OPENAI_API_KEY")
-korean_dict_api_key = os.getenv("KOREAN_DICT_API_KEY")
+korean_dict_api_key = os.getenv("KOREAN_DICT_API_KEY") # <-- 기존 API 키 변수
 
 if not api_key:
     raise ValueError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
@@ -60,7 +59,7 @@ client = OpenAI(api_key=api_key)
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],    # 배포 시 실제 도메인으로 제한 권장
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -100,33 +99,31 @@ SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가�
   예시) 입력: 국무총리는 어떻게 임명돼? / 출력: 국무총리는 어떻게 정해?"""
 
 # ==========================================
-# 7) 기존 모듈 초기화 (g2pk, hangul-romanize, Kiwi 등)
-#    Kiwi 초기화로 변경
+# 7) 기존 모듈 초기화 (g2pk, hangul-romanize, Okt 등)
 # ==========================================
 g2p = G2p()
 transliter = Transliter(academic)
+okt = Okt() # Okt는 이미 존재하므로 중복 초기화 방지
 
-# Kiwi 형태소 분석기 초기화
-kiwi = Kiwi() # <-- Kiwi 객체 생성
-
-# Kiwi 품사 태그를 9품사로 매핑 (Okt와 품사 태그가 다름!)
-# 이 매핑은 Kiwi 공식 문서나 테스트를 통해 정확히 확인해야 합니다.
-kiwi_to_nine_pos = {
-    'NNG': '명사', 'NNP': '명사', 'NNB': '명사', 'NR': '수사', # 명사, 고유명사, 의존명사, 수사
-    'NP': '대명사', # 대명사
-    'VV': '동사', 'VA': '형용사', 'VCN': '동사', 'VCP': '동사', # 동사, 형용사, 보조동사, 보조형용사 (Okt와 비슷하게 동사/형용사로 통일)
-    'MAG': '부사', 'MAJ': '부사', # 일반 부사, 접속 부사
-    'MM': '관형사', # 관형사
-    'IC': '감탄사', # 감탄사
-    # 제외할 품사 (조사, 어미, 구두점, 어근 등)
-    'JKS': None, 'JKC': None, 'JKG': None, 'JKO': None, 'JKB': None, 'JKV': None, 'JKQ': None, 'JX': None, 'JC': None,
-    'EP': None, 'EF': None, 'EC': None, 'ETN': None, 'ETM': None,
-    'SF': None, 'SS': None, 'SP': None, 'SE': None, 'SO': None,
-    'XR': None, 'XPN': None, 'XSN': None, 'XSV': None, 'XSA': None,
-    'SL': '명사', 'SH': '명사', 'SW': '명사', # 외래어, 한자, 기타 기호 (명사로 처리)
-    'NA': None, # 분석불능
+# 새로 추가된 품사 매핑
+okt_to_nine_pos = {
+    "Noun": "명사",
+    "Pronoun": "대명사",
+    "Number": "수사",
+    "Verb": "동사",
+    "Adjective": "형용사",
+    "Adverb": "부사",
+    "Exclamation": "감탄사",
+    "Determiner": "관형사",
+    "Conjunction": "부사",      # 전통 문법상 부사 취급
+    "Foreign": "명사",          # 외래어는 명사 취급
+    "Alpha": "명사",            # 알파벳도 명사 취급
+    "Josa": None,
+    "Eomi": None,
+    "PreEomi": None,
+    "Modifier": None,
+    "Punctuation": None,
 }
-
 
 # ==========================================
 # 8) TTS 파일 저장 디렉터리 및 StaticFiles 마운트
@@ -134,8 +131,10 @@ kiwi_to_nine_pos = {
 TTS_OUTPUT_DIR = "tts_files"
 os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
 
+# 여기서 “tts_files/” 내부의 MP3 파일들을 /tts/ 경로로 서빙
 app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
 
+# 배포 환경 호스트네임 (예: Render)
 render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 if render_host:
     BASE_URL = f"https://{render_host}"
@@ -143,7 +142,7 @@ else:
     BASE_URL = "http://localhost:8000"
 
 # ==========================================
-# 9) 헬퍼 함수들 (Kiwi로 변경)
+# 9) 헬퍼 함수들 (수정 및 추가)
 # ==========================================
 def convert_pronunciation_to_roman(sentence: str) -> str:
     korean_pron = g2p(sentence)
@@ -157,39 +156,37 @@ def translate_korean_to_english(text: str) -> str:
         print(f"[Translation error] {e}")
         return f"Translation error: {e}"
 
-# 문장에서 단어를 9품사 기준으로 추출 (Kiwi 사용)
+# 1. 문장에서 단어를 9품사 기준으로 추출 (기존 extract_keywords 대체)
 def extract_words_9pos(sentence: str):
-    # Kiwi의 tokenize()는 토큰 객체의 리스트를 반환합니다.
-    # 각 토큰은 .form (원형), .tag (품사) 속성을 가집니다.
-    words = kiwi.tokenize(sentence)
-
+    words = okt.pos(sentence, stem=True)
     result = []
-    for token in words:
-        word_form = token.form # 단어의 원형
-        word_tag = token.tag   # Kiwi 품사 태그 (예: NNG, VV)
+    for word, tag in words:
+        pos = okt_to_nine_pos.get(tag)
+        # '아주'에 대한 품사 강제 변경 로직은 여기서는 필요 없음.
+        # 기존 extract_keywords에서 '아주' 로직은 Noun -> Adverb 변경이었는데,
+        # 새로운 okt_to_nine_pos 맵은 'Adverb'를 '부사'로 매핑하므로 
+        # '아주'가 Adverb로 나오면 자동 처리됨.
+        # 만약 '아주'가 Noun으로 나올 경우를 대비한 추가 로직은 필요시 여기에 넣을 수 있음.
+        if word == '아주' and pos == '명사': # Okt가 '아주'를 명사로 잘못 분류하는 경우
+            pos = '부사' # '명사'로 분류된 '아주'를 '부사'로 변경
 
-        pos = kiwi_to_nine_pos.get(word_tag) # 매핑된 한글 품사 (예: 명사, 동사)
-
-        # '아주'에 대한 품사 강제 변경 로직은 여기서는 word_form으로 확인
-        if word_form == '아주' and pos == '명사':
-            pos = '부사'
-
-        if pos: # 매핑된 품사가 None이 아니면 (즉, 제외할 품사가 아니면) 추가
-            result.append((word_form, pos))
-    
+        if pos:
+            result.append((word, pos))
+    # 중복 제거 및 리스트 반환
+    # Set을 바로 반환하면 순서가 보장되지 않으므로, 원래의 로직처럼 중복 제거 후 순서 유지
     seen = set()
     ordered_unique = []
     for w, p in result:
-        if (w,p) not in seen:
+        if (w,p) not in seen: # (단어, 품사) 쌍으로 중복 제거
             seen.add((w,p))
             ordered_unique.append((w,p))
-    return ordered_unique
+    return ordered_unique # 중복 제거된 (단어, 품사) 튜플 리스트
 
+# 2. 조건에 따라 여러 품사를 허용하도록 수정 (기존 get_valid_senses_excluding_pronoun 대체)
 def get_word_info_filtered(word: str):
-    start_time_single_dict_call = time.time()
     url = "https://stdict.korean.go.kr/api/search.do"
     params = {
-        "key": korean_dict_api_key,
+        "key": korean_dict_api_key, # <-- API_KEY 대신 환경 변수 이름 사용
         "q": word,
         "req_type": "xml"
     }
@@ -197,7 +194,6 @@ def get_word_info_filtered(word: str):
     response = requests.get(url, params=params)
     if response.status_code != 200:
         print(f"[ERROR] 국어사전 API 요청 실패: {response.status_code}, {response.text}")
-        print(f"[Timing] Single Dictionary call for '{word}' failed: {time.time() - start_time_single_dict_call:.4f}s")
         return []
 
     soup = BeautifulSoup(response.content, "xml")
@@ -207,14 +203,16 @@ def get_word_info_filtered(word: str):
     for item in items:
         definition = item.find("definition")
         pos_tag = item.find("pos")
-        sup_no = item.find("sup_no")
+        sup_no = item.find("sup_no") # sup_no도 중복 제거에 활용
 
+        # 품사 태그가 없거나 '품사 없음'인 경우 제외
         if pos_tag is None:
             continue
         pos_text = pos_tag.text.strip()
         if pos_text == "" or pos_text == "품사 없음":
             continue
 
+        # 뜻풀이가 없으면 제외
         if definition is None or not definition.text.strip():
             continue
 
@@ -222,11 +220,12 @@ def get_word_info_filtered(word: str):
         sup_no_text = sup_no.text.strip() if sup_no else ""
 
         entries.append({
-            "sup_no": sup_no_text,
-            "pos": pos_text,
-            "definition": definition_text
+            "sup_no": sup_no_text, # 중복 제거를 위해 sup_no 추가
+            "pos": pos_text, # '품사' 대신 'pos'로 통일
+            "definition": definition_text # '뜻풀이' 대신 'definition'으로 통일
         })
     
+    # sup_no를 기준으로 중복 제거 (get_valid_senses_excluding_pronoun의 로직과 유사)
     seen_supnos = set()
     unique_entries = []
     for entry in entries:
@@ -234,15 +233,18 @@ def get_word_info_filtered(word: str):
             seen_supnos.add(entry["sup_no"])
             unique_entries.append(entry)
 
+    # 명사는 뒤로 밀기 (대명사도 명사에 포함/ 만약 대명사가 존재할시 대명사 우선 출력)
+    # 기존 코드에서 대명사 우선 출력을 명시했지만, 명사를 뒤로 미는 로직과 상충됨.
+    # 대명사를 '명사'로 처리하고 명사 뒤로 미는 로직에 포함시키는 것이 더 자연스럽습니다.
+    # 만약 '대명사' 품사를 명사보다 우선하고 싶다면, 정렬 로직을 더 복잡하게 만들어야 합니다.
+    # 여기서는 제공해주신 코드의 '명사는 뒤로 밀기' 로직을 따르겠습니다.
+    # 즉, 대명사도 명사로 간주하여 뒤로 밀림.
     sorted_entries = sorted(unique_entries, key=lambda x: 1 if x["pos"] == "명사" else 0)
 
     if not sorted_entries:
-        print(f"[Timing] Single Dictionary call for '{word}' (no results): {time.time() - start_time_single_dict_call:.4f}s")
         return []
 
-    result = sorted_entries[:4]
-    print(f"[Timing] Single Dictionary call for '{word}': {time.time() - start_time_single_dict_call:.4f}s (results: {len(result)})")
-    return result
+    return sorted_entries[:4] # 출력할 양 조절(현재 4개 이하로 출력되도록 설정)
 
 
 def generate_tts_to_file(text: str) -> str :
@@ -316,17 +318,9 @@ async def speak(text: str = Form(...)):
 
 @app.post("/translate-to-easy-korean")
 async def translate_to_easy_korean(input_data: TextInput):
-    start_total = time.time()
-    print(f"\n[Timing] --- New Request Received ---")
-    print(f"[Timing] Input text: '{input_data.text[:50]}...'")
-
     try:
-        start_romanize_original = time.time()
         original_romanized_pronunciation = convert_pronunciation_to_roman(input_data.text)
-        print(f"[Timing] 1. Original Romanization: {time.time() - start_romanize_original:.4f}s")
 
-
-        start_gpt_call = time.time()
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": input_data.text},
@@ -337,42 +331,27 @@ async def translate_to_easy_korean(input_data: TextInput):
             temperature=0.7,
             max_tokens=150,
         )
+
         translated_text = response.choices[0].message.content.strip()
-        print(f"[Timing] 2. OpenAI GPT-4o-mini call: {time.time() - start_gpt_call:.4f}s")
-
-
-        start_romanize_translated = time.time()
         translated_romanized_pronunciation = convert_pronunciation_to_roman(translated_text)
-        print(f"[Timing] 3. Translated Romanization: {time.time() - start_romanize_translated:.4f}s")
-
-
-        start_google_translate = time.time()
         translated_english_translation = translate_korean_to_english(translated_text)
-        print(f"[Timing] 4. Google Translate call: {time.time() - start_google_translate:.4f}s")
-
 
         keywords_with_definitions = []
-        start_extract_keywords_pos = time.time()
-        keywords = extract_words_9pos(translated_text)
-        print(f"[Timing] 5. Keyword extraction (Kiwi): {time.time() - start_extract_keywords_pos:.4f}s (Found {len(keywords)} keywords)")
-
-        
-        start_dict_calls_total = time.time()
-        for i, (word, pos_tag) in enumerate(keywords):
-            senses = get_word_info_filtered(word)
+        # 변경된 extract_words_9pos 함수 사용
+        keywords = extract_words_9pos(translated_text) # (단어, 품사) 튜플의 리스트
+        for word, pos_tag in keywords: # pos_tag는 이제 한글 품사입니다. (명사, 동사 등)
+            # 변경된 get_word_info_filtered 함수 사용
+            senses = get_word_info_filtered(word) # 이 함수는 이미 필터링 및 정렬을 수행함
 
             if senses:
+                # get_word_info_filtered의 반환 형식에 맞춰 조정
+                # 각 sense는 'pos'와 'definition' 키를 가짐
                 formatted_senses = [{"pos": s["pos"], "definition": s["definition"]} for s in senses]
                 keywords_with_definitions.append({
                     "word": word,
-                    "pos": pos_tag,
+                    "pos": pos_tag, # extract_words_9pos에서 가져온 품사 유지
                     "definitions": formatted_senses,
                 })
-        print(f"[Timing] 6. Total Dictionary API calls for {len(keywords)} keywords: {time.time() - start_dict_calls_total:.4f}s")
-
-
-        total_processing_time = time.time() - start_total
-        print(f"[Timing] --- Request Processed --- Total time: {total_processing_time:.4f}s")
 
         return JSONResponse(content={
             "original_text": input_data.text,
@@ -384,9 +363,7 @@ async def translate_to_easy_korean(input_data: TextInput):
         })
 
     except Exception as e:
-        import traceback
+        import traceback # 예외 발생 시 전체 스택 트레이스 출력
         traceback.print_exc()
-        print(f"[ERROR] API 처리 중 에러: {e}")
-        total_processing_time = time.time() - start_total
-        print(f"[Timing] --- Request Failed --- Total time: {total_processing_time:.4f}s")
+        print(f"[translate-to-easy-korean] API 처리 중 에러: {e}")
         raise HTTPException(status_code=500, detail=f"API 처리 중 에러가 발생했습니다: {e}")
