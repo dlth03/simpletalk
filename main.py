@@ -14,11 +14,9 @@ from deep_translator import GoogleTranslator
 import requests
 import xml.etree.ElementTree as ET
 from konlpy.tag import Okt
-from bs4 import BeautifulSoup # <-- 새로 추가된 임포트
-import time # <-- 시간 측정을 위해 time 모듈 임포트
-
-# Google Cloud TTS 라이브러리
-from google.cloud import texttospeech
+from bs4 import BeautifulSoup
+import time
+import jpype # jpype 모듈 임포트 추가
 
 # ==========================================
 # 1) GOOGLE_APPLICATION_CREDENTIALS 환경 변수 처리
@@ -42,7 +40,7 @@ else:
 # 2) 나머지 환경 변수 확인
 # ==========================================
 api_key = os.getenv("OPENAI_API_KEY")
-korean_dict_api_key = os.getenv("KOREAN_DICT_API_KEY") # <-- 기존 API 키 변수
+korean_dict_api_key = os.getenv("KOREAN_DICT_API_KEY")
 
 if not api_key:
     raise ValueError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
@@ -101,12 +99,31 @@ SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가�
 
 # ==========================================
 # 7) 기존 모듈 초기화 (g2pk, hangul-romanize, Okt 등)
+#    Okt 초기화 부분에 JVM 메모리 설정 추가
 # ==========================================
 g2p = G2p()
 transliter = Transliter(academic)
-okt = Okt() # Okt는 이미 존재하므로 중복 초기화 방지
 
-# 새로 추가된 품사 매핑
+# Okt 객체를 생성하기 전에 JPype가 실행되고 있지 않다면 JVM을 시작합니다.
+# Render.com 환경의 메모리 제한을 고려하여 -Xmx 값을 설정합니다.
+# 일반적으로 512m 또는 1g로 시작하여 테스트해보고 필요시 조정합니다.
+try:
+    if not jpype.isJVMStarted():
+        # Render.com의 무료 플랜은 보통 512MB 또는 1GB 메모리를 제공합니다.
+        # -Xmx는 최대 힙 메모리, -Xms는 초기 힙 메모리입니다.
+        jpype.startJVM(jpype.getDefaultJVMPath(), "-ea", "-Xmx1g", "-Xms256m")
+        print("[INFO] JVM started with -Xmx1g -Xms256m for Okt.")
+    else:
+        print("[INFO] JVM already started for Okt.")
+except Exception as e:
+    print(f"[ERROR] Failed to start JVM for Okt: {e}")
+    print("[ERROR] Okt might not perform optimally or fail. Please check JVM setup.")
+    # JVM 시작 실패 시에도 Okt 객체는 일단 생성 시도 (대부분의 경우 실패하지만, 방어 코드)
+    pass # JVM 시작 실패 시에도 앱이 완전히 죽지 않도록 pass
+
+okt = Okt() # JVM 시작 시도 또는 기존 JVM 사용 후 Okt 객체 생성
+
+# 품사 매핑
 okt_to_nine_pos = {
     "Noun": "명사",
     "Pronoun": "대명사",
@@ -116,9 +133,9 @@ okt_to_nine_pos = {
     "Adverb": "부사",
     "Exclamation": "감탄사",
     "Determiner": "관형사",
-    "Conjunction": "부사",      # 전통 문법상 부사 취급
-    "Foreign": "명사",          # 외래어는 명사 취급
-    "Alpha": "명사",            # 알파벳도 명사 취급
+    "Conjunction": "부사",
+    "Foreign": "명사",
+    "Alpha": "명사",
     "Josa": None,
     "Eomi": None,
     "PreEomi": None,
@@ -132,10 +149,8 @@ okt_to_nine_pos = {
 TTS_OUTPUT_DIR = "tts_files"
 os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
 
-# 여기서 “tts_files/” 내부의 MP3 파일들을 /tts/ 경로로 서빙
 app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
 
-# 배포 환경 호스트네임 (예: Render)
 render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 if render_host:
     BASE_URL = f"https://{render_host}"
@@ -157,17 +172,17 @@ def translate_korean_to_english(text: str) -> str:
         print(f"[Translation error] {e}")
         return f"Translation error: {e}"
 
-# 1. 문장에서 단어를 9품사 기준으로 추출 (기존 extract_keywords 대체)
 def extract_words_9pos(sentence: str):
     words = okt.pos(sentence, stem=True)
     result = []
     for word, tag in words:
         pos = okt_to_nine_pos.get(tag)
-        if word == '아주' and pos == '명사': # Okt가 '아주'를 명사로 잘못 분류하는 경우
-            pos = '부사' # '명사'로 분류된 '아주'를 '부사'로 변경
+        if word == '아주' and pos == '명사':
+            pos = '부사'
 
         if pos:
             result.append((word, pos))
+    
     seen = set()
     ordered_unique = []
     for w, p in result:
@@ -176,9 +191,8 @@ def extract_words_9pos(sentence: str):
             ordered_unique.append((w,p))
     return ordered_unique
 
-# 2. 조건에 따라 여러 품사를 허용하도록 수정 (기존 get_valid_senses_excluding_pronoun 대체)
 def get_word_info_filtered(word: str):
-    start_time_single_dict_call = time.time() # <-- 개별 사전 호출 시간 측정 시작
+    start_time_single_dict_call = time.time()
     url = "https://stdict.korean.go.kr/api/search.do"
     params = {
         "key": korean_dict_api_key,
@@ -189,7 +203,7 @@ def get_word_info_filtered(word: str):
     response = requests.get(url, params=params)
     if response.status_code != 200:
         print(f"[ERROR] 국어사전 API 요청 실패: {response.status_code}, {response.text}")
-        print(f"[Timing] Single Dictionary call for '{word}' failed: {time.time() - start_time_single_dict_call:.4f}s") # <-- 실패 시간 로깅
+        print(f"[Timing] Single Dictionary call for '{word}' failed: {time.time() - start_time_single_dict_call:.4f}s")
         return []
 
     soup = BeautifulSoup(response.content, "xml")
@@ -229,11 +243,11 @@ def get_word_info_filtered(word: str):
     sorted_entries = sorted(unique_entries, key=lambda x: 1 if x["pos"] == "명사" else 0)
 
     if not sorted_entries:
-        print(f"[Timing] Single Dictionary call for '{word}' (no results): {time.time() - start_time_single_dict_call:.4f}s") # <-- 결과 없음 시간 로깅
+        print(f"[Timing] Single Dictionary call for '{word}' (no results): {time.time() - start_time_single_dict_call:.4f}s")
         return []
 
-    result = sorted_entries[:4] # 출력할 양 조절(현재 4개 이하로 출력되도록 설정)
-    print(f"[Timing] Single Dictionary call for '{word}': {time.time() - start_time_single_dict_call:.4f}s (results: {len(result)})") # <-- 성공 시간 로깅
+    result = sorted_entries[:4]
+    print(f"[Timing] Single Dictionary call for '{word}': {time.time() - start_time_single_dict_call:.4f}s (results: {len(result)})")
     return result
 
 
@@ -308,9 +322,9 @@ async def speak(text: str = Form(...)):
 
 @app.post("/translate-to-easy-korean")
 async def translate_to_easy_korean(input_data: TextInput):
-    start_total = time.time() # <-- 전체 API 처리 시간 측정 시작
+    start_total = time.time()
     print(f"\n[Timing] --- New Request Received ---")
-    print(f"[Timing] Input text: '{input_data.text[:50]}...'") # 긴 텍스트는 잘라서 출력
+    print(f"[Timing] Input text: '{input_data.text[:50]}...'")
 
     try:
         start_romanize_original = time.time()
@@ -345,14 +359,12 @@ async def translate_to_easy_korean(input_data: TextInput):
 
         keywords_with_definitions = []
         start_extract_keywords_pos = time.time()
-        keywords = extract_words_9pos(translated_text) # (단어, 품사) 튜플의 리스트
+        keywords = extract_words_9pos(translated_text)
         print(f"[Timing] 5. Keyword extraction (Okt): {time.time() - start_extract_keywords_pos:.4f}s (Found {len(keywords)} keywords)")
 
         
-        # 키워드별 국어사전 API 호출 시간은 get_word_info_filtered 함수 내부에서 측정됨
         start_dict_calls_total = time.time()
         for i, (word, pos_tag) in enumerate(keywords):
-            # get_word_info_filtered 함수 내부에 이미 로깅 코드가 추가되어 있습니다.
             senses = get_word_info_filtered(word)
 
             if senses:
@@ -378,7 +390,7 @@ async def translate_to_easy_korean(input_data: TextInput):
         })
 
     except Exception as e:
-        import traceback # 예외 발생 시 전체 스택 트레이스 출력
+        import traceback
         traceback.print_exc()
         print(f"[ERROR] API 처리 중 에러: {e}")
         total_processing_time = time.time() - start_total
