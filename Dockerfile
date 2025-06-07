@@ -8,23 +8,15 @@ RUN apt-get update -y || (sleep 5 && apt-get update -y) || (sleep 5 && apt-get u
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # 패키지 저장소 미러 변경 (카카오 미러 대신 기본 Debian 공식 미러 사용)
-# 기존에 추가했던 RUN echo "deb http://mirror.kakao.com..." 라인들을 제거합니다.
-# 대신, 다음 라인들을 추가합니다.
 RUN echo "deb http://deb.debian.org/debian bookworm main contrib non-free" > /etc/apt/sources.list.d/debian.list && \
     echo "deb http://deb.debian.org/debian bookworm-updates main contrib non-free" >> /etc/apt/sources.list.d/debian.list && \
     echo "deb http://deb.debian.org/debian-security bookworm-security main contrib non-free" >> /etc/apt/sources.list.d/debian.list && \
     apt-get update -y || (sleep 5 && apt-get update -y) || (sleep 5 && apt-get update -y)
 
-
 # OpenJDK 17 설치 및 불필요한 패키지 제거, apt 캐시 정리
 # apt-get install이 실패하면 5초 대기 후 최대 3번까지 재시도
-RUN /bin/bash -c " \
-    for i in $(seq 1 3); do \
-        apt-get install -y --no-install-recommends openjdk-17-jdk ca-certificates-java && break; \
-        echo 'apt-get install failed, retrying in 5 seconds...'; \
-        sleep 5; \
-    done || exit 1; \
-" && \
+# 이 부분이 변경되었습니다: 모든 명령을 한 줄로 연결하고 불필요한 공백을 제거했습니다.
+RUN /bin/bash -c "for i in $(seq 1 3); do apt-get install -y --no-install-recommends openjdk-17-jdk ca-certificates-java && break; echo 'apt-get install failed, retrying in 5 seconds...'; sleep 5; done || exit 1;" && \
     apt-get autoremove -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
