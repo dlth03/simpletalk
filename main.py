@@ -15,7 +15,7 @@ import requests
 import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 import time
-from kiwi import Kiwi # <-- Kiwi 임포트 추가
+from kiwi.tag import Kiwi
 
 # Google Cloud TTS 라이브러리
 from google.cloud import texttospeech
