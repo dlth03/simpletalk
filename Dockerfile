@@ -1,14 +1,23 @@
 # Dockerfile
 FROM python:3.10
 
-# apt 캐시 업데이트 (강제 실행 및 캐시 정리)
-# update 실패 시 빌드 중단 (더 명확한 오류 확인)
-RUN apt-get update -y && \
+# 빌드 중 apt-get이 사용자 입력을 요청하지 않도록 설정
+ENV DEBIAN_FRONTEND=noninteractive
+
+# apt 캐시 업데이트 및 초기 정리
+# update가 실패하면 5초 대기 후 최대 3번까지 재시도
+RUN apt-get update -y || (sleep 5 && apt-get update -y) || (sleep 5 && apt-get update -y) && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # OpenJDK 17 설치 및 불필요한 패키지 제거, apt 캐시 정리
-# 이 부분이 문제이므로, 가장 안정적인 설치 방법을 시도
-RUN apt-get install -y --no-install-recommends openjdk-17-jdk ca-certificates-java && \
+# apt-get install이 실패하면 5초 대기 후 최대 3번까지 재시도
+RUN /bin/bash -c " \
+    for i in $(seq 1 3); do \
+        apt-get install -y --no-install-recommends openjdk-17-jdk ca-certificates-java && break; \
+        echo 'apt-get install failed, retrying in 5 seconds...'; \
+        sleep 5; \
+    done || exit 1; \
+" && \
     apt-get autoremove -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
