@@ -1,15 +1,14 @@
 # Dockerfile
 FROM python:3.10
 
-# apt 캐시 업데이트 및 초기 정리 (더 견고하게)
-# apt-get update 실패 시 재시도 로직 추가
-RUN apt-get update -y || (sleep 5 && apt-get update -y) && \
+# apt 캐시 업데이트 (강제 실행 및 캐시 정리)
+# update 실패 시 빌드 중단 (더 명확한 오류 확인)
+RUN apt-get update -y && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # OpenJDK 17 설치 및 불필요한 패키지 제거, apt 캐시 정리
-# 설치 실패 시 재시도 로직 추가
-RUN apt-get install -y --no-install-recommends openjdk-17-jdk ca-certificates-java || \
-    (sleep 5 && apt-get install -y --no-install-recommends openjdk-17-jdk ca-certificates-java) && \
+# 이 부분이 문제이므로, 가장 안정적인 설치 방법을 시도
+RUN apt-get install -y --no-install-recommends openjdk-17-jdk ca-certificates-java && \
     apt-get autoremove -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
