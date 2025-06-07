@@ -22,6 +22,7 @@ COPY requirements.txt .
 # TTS 파일을 저장할 디렉토리 생성 (컨테이너 내부에서 gTTS가 파일 생성할 공간)
 RUN mkdir -p tts_files
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade --force-reinstall konlpy jpype1 # 추가 부분
 
 COPY . .
 
