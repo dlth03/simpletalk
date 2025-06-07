@@ -15,6 +15,7 @@ import requests
 import xml.etree.ElementTree as ET
 from konlpy.tag import Okt
 from bs4 import BeautifulSoup # <-- 새로 추가된 임포트
+import time # <-- 시간 측정을 위해 time 모듈 임포트
 
 # Google Cloud TTS 라이브러리
 from google.cloud import texttospeech
@@ -162,31 +163,25 @@ def extract_words_9pos(sentence: str):
     result = []
     for word, tag in words:
         pos = okt_to_nine_pos.get(tag)
-        # '아주'에 대한 품사 강제 변경 로직은 여기서는 필요 없음.
-        # 기존 extract_keywords에서 '아주' 로직은 Noun -> Adverb 변경이었는데,
-        # 새로운 okt_to_nine_pos 맵은 'Adverb'를 '부사'로 매핑하므로 
-        # '아주'가 Adverb로 나오면 자동 처리됨.
-        # 만약 '아주'가 Noun으로 나올 경우를 대비한 추가 로직은 필요시 여기에 넣을 수 있음.
         if word == '아주' and pos == '명사': # Okt가 '아주'를 명사로 잘못 분류하는 경우
             pos = '부사' # '명사'로 분류된 '아주'를 '부사'로 변경
 
         if pos:
             result.append((word, pos))
-    # 중복 제거 및 리스트 반환
-    # Set을 바로 반환하면 순서가 보장되지 않으므로, 원래의 로직처럼 중복 제거 후 순서 유지
     seen = set()
     ordered_unique = []
     for w, p in result:
-        if (w,p) not in seen: # (단어, 품사) 쌍으로 중복 제거
+        if (w,p) not in seen:
             seen.add((w,p))
             ordered_unique.append((w,p))
-    return ordered_unique # 중복 제거된 (단어, 품사) 튜플 리스트
+    return ordered_unique
 
 # 2. 조건에 따라 여러 품사를 허용하도록 수정 (기존 get_valid_senses_excluding_pronoun 대체)
 def get_word_info_filtered(word: str):
+    start_time_single_dict_call = time.time() # <-- 개별 사전 호출 시간 측정 시작
     url = "https://stdict.korean.go.kr/api/search.do"
     params = {
-        "key": korean_dict_api_key, # <-- API_KEY 대신 환경 변수 이름 사용
+        "key": korean_dict_api_key,
         "q": word,
         "req_type": "xml"
     }
@@ -194,6 +189,7 @@ def get_word_info_filtered(word: str):
     response = requests.get(url, params=params)
     if response.status_code != 200:
         print(f"[ERROR] 국어사전 API 요청 실패: {response.status_code}, {response.text}")
+        print(f"[Timing] Single Dictionary call for '{word}' failed: {time.time() - start_time_single_dict_call:.4f}s") # <-- 실패 시간 로깅
         return []
 
     soup = BeautifulSoup(response.content, "xml")
@@ -203,16 +199,14 @@ def get_word_info_filtered(word: str):
     for item in items:
         definition = item.find("definition")
         pos_tag = item.find("pos")
-        sup_no = item.find("sup_no") # sup_no도 중복 제거에 활용
+        sup_no = item.find("sup_no")
 
-        # 품사 태그가 없거나 '품사 없음'인 경우 제외
         if pos_tag is None:
             continue
         pos_text = pos_tag.text.strip()
         if pos_text == "" or pos_text == "품사 없음":
             continue
 
-        # 뜻풀이가 없으면 제외
         if definition is None or not definition.text.strip():
             continue
 
@@ -220,12 +214,11 @@ def get_word_info_filtered(word: str):
         sup_no_text = sup_no.text.strip() if sup_no else ""
 
         entries.append({
-            "sup_no": sup_no_text, # 중복 제거를 위해 sup_no 추가
-            "pos": pos_text, # '품사' 대신 'pos'로 통일
-            "definition": definition_text # '뜻풀이' 대신 'definition'으로 통일
+            "sup_no": sup_no_text,
+            "pos": pos_text,
+            "definition": definition_text
         })
     
-    # sup_no를 기준으로 중복 제거 (get_valid_senses_excluding_pronoun의 로직과 유사)
     seen_supnos = set()
     unique_entries = []
     for entry in entries:
@@ -233,18 +226,15 @@ def get_word_info_filtered(word: str):
             seen_supnos.add(entry["sup_no"])
             unique_entries.append(entry)
 
-    # 명사는 뒤로 밀기 (대명사도 명사에 포함/ 만약 대명사가 존재할시 대명사 우선 출력)
-    # 기존 코드에서 대명사 우선 출력을 명시했지만, 명사를 뒤로 미는 로직과 상충됨.
-    # 대명사를 '명사'로 처리하고 명사 뒤로 미는 로직에 포함시키는 것이 더 자연스럽습니다.
-    # 만약 '대명사' 품사를 명사보다 우선하고 싶다면, 정렬 로직을 더 복잡하게 만들어야 합니다.
-    # 여기서는 제공해주신 코드의 '명사는 뒤로 밀기' 로직을 따르겠습니다.
-    # 즉, 대명사도 명사로 간주하여 뒤로 밀림.
     sorted_entries = sorted(unique_entries, key=lambda x: 1 if x["pos"] == "명사" else 0)
 
     if not sorted_entries:
+        print(f"[Timing] Single Dictionary call for '{word}' (no results): {time.time() - start_time_single_dict_call:.4f}s") # <-- 결과 없음 시간 로깅
         return []
 
-    return sorted_entries[:4] # 출력할 양 조절(현재 4개 이하로 출력되도록 설정)
+    result = sorted_entries[:4] # 출력할 양 조절(현재 4개 이하로 출력되도록 설정)
+    print(f"[Timing] Single Dictionary call for '{word}': {time.time() - start_time_single_dict_call:.4f}s (results: {len(result)})") # <-- 성공 시간 로깅
+    return result
 
 
 def generate_tts_to_file(text: str) -> str :
@@ -318,9 +308,17 @@ async def speak(text: str = Form(...)):
 
 @app.post("/translate-to-easy-korean")
 async def translate_to_easy_korean(input_data: TextInput):
-    try:
-        original_romanized_pronunciation = convert_pronunciation_to_roman(input_data.text)
+    start_total = time.time() # <-- 전체 API 처리 시간 측정 시작
+    print(f"\n[Timing] --- New Request Received ---")
+    print(f"[Timing] Input text: '{input_data.text[:50]}...'") # 긴 텍스트는 잘라서 출력
 
+    try:
+        start_romanize_original = time.time()
+        original_romanized_pronunciation = convert_pronunciation_to_roman(input_data.text)
+        print(f"[Timing] 1. Original Romanization: {time.time() - start_romanize_original:.4f}s")
+
+
+        start_gpt_call = time.time()
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": input_data.text},
@@ -331,27 +329,44 @@ async def translate_to_easy_korean(input_data: TextInput):
             temperature=0.7,
             max_tokens=150,
         )
-
         translated_text = response.choices[0].message.content.strip()
+        print(f"[Timing] 2. OpenAI GPT-4o-mini call: {time.time() - start_gpt_call:.4f}s")
+
+
+        start_romanize_translated = time.time()
         translated_romanized_pronunciation = convert_pronunciation_to_roman(translated_text)
+        print(f"[Timing] 3. Translated Romanization: {time.time() - start_romanize_translated:.4f}s")
+
+
+        start_google_translate = time.time()
         translated_english_translation = translate_korean_to_english(translated_text)
+        print(f"[Timing] 4. Google Translate call: {time.time() - start_google_translate:.4f}s")
+
 
         keywords_with_definitions = []
-        # 변경된 extract_words_9pos 함수 사용
+        start_extract_keywords_pos = time.time()
         keywords = extract_words_9pos(translated_text) # (단어, 품사) 튜플의 리스트
-        for word, pos_tag in keywords: # pos_tag는 이제 한글 품사입니다. (명사, 동사 등)
-            # 변경된 get_word_info_filtered 함수 사용
-            senses = get_word_info_filtered(word) # 이 함수는 이미 필터링 및 정렬을 수행함
+        print(f"[Timing] 5. Keyword extraction (Okt): {time.time() - start_extract_keywords_pos:.4f}s (Found {len(keywords)} keywords)")
+
+        
+        # 키워드별 국어사전 API 호출 시간은 get_word_info_filtered 함수 내부에서 측정됨
+        start_dict_calls_total = time.time()
+        for i, (word, pos_tag) in enumerate(keywords):
+            # get_word_info_filtered 함수 내부에 이미 로깅 코드가 추가되어 있습니다.
+            senses = get_word_info_filtered(word)
 
             if senses:
-                # get_word_info_filtered의 반환 형식에 맞춰 조정
-                # 각 sense는 'pos'와 'definition' 키를 가짐
                 formatted_senses = [{"pos": s["pos"], "definition": s["definition"]} for s in senses]
                 keywords_with_definitions.append({
                     "word": word,
-                    "pos": pos_tag, # extract_words_9pos에서 가져온 품사 유지
+                    "pos": pos_tag,
                     "definitions": formatted_senses,
                 })
+        print(f"[Timing] 6. Total Dictionary API calls for {len(keywords)} keywords: {time.time() - start_dict_calls_total:.4f}s")
+
+
+        total_processing_time = time.time() - start_total
+        print(f"[Timing] --- Request Processed --- Total time: {total_processing_time:.4f}s")
 
         return JSONResponse(content={
             "original_text": input_data.text,
@@ -365,5 +380,7 @@ async def translate_to_easy_korean(input_data: TextInput):
     except Exception as e:
         import traceback # 예외 발생 시 전체 스택 트레이스 출력
         traceback.print_exc()
-        print(f"[translate-to-easy-korean] API 처리 중 에러: {e}")
+        print(f"[ERROR] API 처리 중 에러: {e}")
+        total_processing_time = time.time() - start_total
+        print(f"[Timing] --- Request Failed --- Total time: {total_processing_time:.4f}s")
         raise HTTPException(status_code=500, detail=f"API 처리 중 에러가 발생했습니다: {e}")
