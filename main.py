@@ -13,10 +13,12 @@ from hangul_romanize.rule import academic
 from deep_translator import GoogleTranslator
 import requests
 import xml.etree.ElementTree as ET
-from konlpy.tag import Okt
 from bs4 import BeautifulSoup
 import time
-import jpype # jpype 모듈 임포트 추가
+from kiwi import Kiwi # <-- Kiwi 임포트 추가
+
+# Google Cloud TTS 라이브러리
+from google.cloud import texttospeech
 
 # ==========================================
 # 1) GOOGLE_APPLICATION_CREDENTIALS 환경 변수 처리
@@ -58,7 +60,7 @@ client = OpenAI(api_key=api_key)
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],    # 배포 시 실제 도메인으로 제한 권장
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -98,50 +100,33 @@ SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가�
   예시) 입력: 국무총리는 어떻게 임명돼? / 출력: 국무총리는 어떻게 정해?"""
 
 # ==========================================
-# 7) 기존 모듈 초기화 (g2pk, hangul-romanize, Okt 등)
-#    Okt 초기화 부분에 JVM 메모리 설정 추가
+# 7) 기존 모듈 초기화 (g2pk, hangul-romanize, Kiwi 등)
+#    Kiwi 초기화로 변경
 # ==========================================
 g2p = G2p()
 transliter = Transliter(academic)
 
-# Okt 객체를 생성하기 전에 JPype가 실행되고 있지 않다면 JVM을 시작합니다.
-# Render.com 환경의 메모리 제한을 고려하여 -Xmx 값을 설정합니다.
-# 일반적으로 512m 또는 1g로 시작하여 테스트해보고 필요시 조정합니다.
-try:
-    if not jpype.isJVMStarted():
-        # Render.com의 무료 플랜은 보통 512MB 또는 1GB 메모리를 제공합니다.
-        # -Xmx는 최대 힙 메모리, -Xms는 초기 힙 메모리입니다.
-        jpype.startJVM(jpype.getDefaultJVMPath(), "-ea", "-Xmx1g", "-Xms256m")
-        print("[INFO] JVM started with -Xmx1g -Xms256m for Okt.")
-    else:
-        print("[INFO] JVM already started for Okt.")
-except Exception as e:
-    print(f"[ERROR] Failed to start JVM for Okt: {e}")
-    print("[ERROR] Okt might not perform optimally or fail. Please check JVM setup.")
-    # JVM 시작 실패 시에도 Okt 객체는 일단 생성 시도 (대부분의 경우 실패하지만, 방어 코드)
-    pass # JVM 시작 실패 시에도 앱이 완전히 죽지 않도록 pass
+# Kiwi 형태소 분석기 초기화
+kiwi = Kiwi() # <-- Kiwi 객체 생성
 
-okt = Okt() # JVM 시작 시도 또는 기존 JVM 사용 후 Okt 객체 생성
-
-# 품사 매핑
-okt_to_nine_pos = {
-    "Noun": "명사",
-    "Pronoun": "대명사",
-    "Number": "수사",
-    "Verb": "동사",
-    "Adjective": "형용사",
-    "Adverb": "부사",
-    "Exclamation": "감탄사",
-    "Determiner": "관형사",
-    "Conjunction": "부사",
-    "Foreign": "명사",
-    "Alpha": "명사",
-    "Josa": None,
-    "Eomi": None,
-    "PreEomi": None,
-    "Modifier": None,
-    "Punctuation": None,
+# Kiwi 품사 태그를 9품사로 매핑 (Okt와 품사 태그가 다름!)
+# 이 매핑은 Kiwi 공식 문서나 테스트를 통해 정확히 확인해야 합니다.
+kiwi_to_nine_pos = {
+    'NNG': '명사', 'NNP': '명사', 'NNB': '명사', 'NR': '수사', # 명사, 고유명사, 의존명사, 수사
+    'NP': '대명사', # 대명사
+    'VV': '동사', 'VA': '형용사', 'VCN': '동사', 'VCP': '동사', # 동사, 형용사, 보조동사, 보조형용사 (Okt와 비슷하게 동사/형용사로 통일)
+    'MAG': '부사', 'MAJ': '부사', # 일반 부사, 접속 부사
+    'MM': '관형사', # 관형사
+    'IC': '감탄사', # 감탄사
+    # 제외할 품사 (조사, 어미, 구두점, 어근 등)
+    'JKS': None, 'JKC': None, 'JKG': None, 'JKO': None, 'JKB': None, 'JKV': None, 'JKQ': None, 'JX': None, 'JC': None,
+    'EP': None, 'EF': None, 'EC': None, 'ETN': None, 'ETM': None,
+    'SF': None, 'SS': None, 'SP': None, 'SE': None, 'SO': None,
+    'XR': None, 'XPN': None, 'XSN': None, 'XSV': None, 'XSA': None,
+    'SL': '명사', 'SH': '명사', 'SW': '명사', # 외래어, 한자, 기타 기호 (명사로 처리)
+    'NA': None, # 분석불능
 }
+
 
 # ==========================================
 # 8) TTS 파일 저장 디렉터리 및 StaticFiles 마운트
@@ -158,7 +143,7 @@ else:
     BASE_URL = "http://localhost:8000"
 
 # ==========================================
-# 9) 헬퍼 함수들 (수정 및 추가)
+# 9) 헬퍼 함수들 (Kiwi로 변경)
 # ==========================================
 def convert_pronunciation_to_roman(sentence: str) -> str:
     korean_pron = g2p(sentence)
@@ -172,16 +157,25 @@ def translate_korean_to_english(text: str) -> str:
         print(f"[Translation error] {e}")
         return f"Translation error: {e}"
 
+# 문장에서 단어를 9품사 기준으로 추출 (Kiwi 사용)
 def extract_words_9pos(sentence: str):
-    words = okt.pos(sentence, stem=True)
+    # Kiwi의 tokenize()는 토큰 객체의 리스트를 반환합니다.
+    # 각 토큰은 .form (원형), .tag (품사) 속성을 가집니다.
+    words = kiwi.tokenize(sentence)
+
     result = []
-    for word, tag in words:
-        pos = okt_to_nine_pos.get(tag)
-        if word == '아주' and pos == '명사':
+    for token in words:
+        word_form = token.form # 단어의 원형
+        word_tag = token.tag   # Kiwi 품사 태그 (예: NNG, VV)
+
+        pos = kiwi_to_nine_pos.get(word_tag) # 매핑된 한글 품사 (예: 명사, 동사)
+
+        # '아주'에 대한 품사 강제 변경 로직은 여기서는 word_form으로 확인
+        if word_form == '아주' and pos == '명사':
             pos = '부사'
 
-        if pos:
-            result.append((word, pos))
+        if pos: # 매핑된 품사가 None이 아니면 (즉, 제외할 품사가 아니면) 추가
+            result.append((word_form, pos))
     
     seen = set()
     ordered_unique = []
@@ -360,7 +354,7 @@ async def translate_to_easy_korean(input_data: TextInput):
         keywords_with_definitions = []
         start_extract_keywords_pos = time.time()
         keywords = extract_words_9pos(translated_text)
-        print(f"[Timing] 5. Keyword extraction (Okt): {time.time() - start_extract_keywords_pos:.4f}s (Found {len(keywords)} keywords)")
+        print(f"[Timing] 5. Keyword extraction (Kiwi): {time.time() - start_extract_keywords_pos:.4f}s (Found {len(keywords)} keywords)")
 
         
         start_dict_calls_total = time.time()
