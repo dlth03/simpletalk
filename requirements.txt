@@ -8,7 +8,7 @@ hangul-romanize
 deep-translator
 requests
 beautifulsoup4
-kiwi
+kiwipiepy
 
 # 국어사전 API 응답 파싱에 사용
 lxml
