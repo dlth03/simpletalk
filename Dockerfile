@@ -1,13 +1,18 @@
 # Dockerfile
 FROM python:3.10
-
-# 빌드 중 apt-get이 사용자 입력을 요청하지 않도록 설정
 ENV DEBIAN_FRONTEND=noninteractive
 
 # apt 캐시 업데이트 및 초기 정리
 # update가 실패하면 5초 대기 후 최대 3번까지 재시도
 RUN apt-get update -y || (sleep 5 && apt-get update -y) || (sleep 5 && apt-get update -y) && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 패키지 저장소 미러 변경 (미러 주소는 상황에 따라 변경 가능)
+# 예시: 카카오 미러 사용
+RUN echo "deb http://mirror.kakao.com/debian/ bookworm main contrib non-free" > /etc/apt/sources.list && \
+    echo "deb http://mirror.kakao.com/debian/ bookworm-updates main contrib non-free" >> /etc/apt/sources.list && \
+    echo "deb http://mirror.kakao.com/debian-security bookworm-security main contrib non-free" >> /etc/apt/sources.list && \
+    apt-get update -y || (sleep 5 && apt-get update -y) || (sleep 5 && apt-get update -y)
 
 # OpenJDK 17 설치 및 불필요한 패키지 제거, apt 캐시 정리
 # apt-get install이 실패하면 5초 대기 후 최대 3번까지 재시도
