@@ -9,6 +9,8 @@ deep-translator
 konlpy
 requests
 beautifulsoup4
+httpx
+bs4
 
 # 국어사전 API 응답 파싱에 사용
 lxml
