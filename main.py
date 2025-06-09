@@ -14,10 +14,10 @@ from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 
 # Google Cloud Text-to-Speech 관련 임포트
-from google.cloud import texttospeech # 이 줄을 추가합니다.
+from google.cloud import texttospeech
 
-# g2pk 및 okt-korean 관련 임포트 (설치 필요)
-from g2pk import G2KoKoreanRomanizer
+# g2pk 및 okt-korean 관련 임포트
+from g2pk import G2pKo # G2KoKoreanRomanizer 대신 G2pKo 임포트
 from okt import Okt
 
 # NLTK 데이터 다운로드 (render 배포 시 필요)
@@ -77,7 +77,7 @@ app.add_middleware(
 # --- Global 인스턴스 (필요에 따라) ---
 # Okt 인스턴스는 한 번만 생성하는 것이 효율적
 okt = Okt()
-romanizer = G2KoKoreanRomanizer()
+romanizer = G2pKo() # G2KoKoreanRomanizer() 대신 G2pKo()로 인스턴스화
 # ThreadPoolExecutor for blocking I/O operations (like Google TTS)
 executor = ThreadPoolExecutor(max_workers=5) # 적절한 워커 수 설정
 
@@ -100,7 +100,7 @@ def generate_tts_to_file_sync(text: str) -> str :
     실패 시 None 반환. (to_thread를 통해 동기적으로 실행)
     """
     try:
-        tts_client = texttospeech.TextToSpeechClient() # 여기에 TextToSpeechClient 초기화
+        tts_client = texttospeech.TextToSpeechClient()
         synthesis_input = texttospeech.SynthesisInput(text=text)
 
         # 음성 설정 (한국어, 남성 목소리, 뉴럴넷)
@@ -154,7 +154,7 @@ async def translate_to_easy_korean(request: Request):
         input_text = data.get("text")
         if not input_text:
             raise HTTPException(status_code=400, detail="텍스트를 입력해주세요.")
-        
+
         print(f"[Timing] Input text: '{input_text}'")
 
         # 1. OpenAI GPT-4o-mini 호출
@@ -164,23 +164,51 @@ async def translate_to_easy_korean(request: Request):
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "gpt-4o-mini", # 또는 gpt-3.5-turbo-0125
+            "model": "gpt-4o-mini",
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a helpful assistant that translates Korean sentences into simpler Korean, provides romanized pronunciation for both original and simplified Korean, and gives an English translation for the simplified Korean. Additionally, you will extract important keywords from the original sentence and provide a dictionary definition in Korean for each keyword, along with its English translation and part of speech. When simplifying, try to maintain the original meaning as much as possible but use simpler vocabulary and sentence structures suitable for Korean learners. Ensure the output is strictly in JSON format as specified."
+                    "content": """
+                        당신은 한국어 문장을 단순하게 바꾸는 전문가입니다.
+                        입력된 문장은 다음을 중복 포함할 수 있습니다:
+                        1. 속담 또는 관용어
+                        2. 방언(사투리)
+                        3. 어려운 단어
+                        4. 줄임말
+
+                        각 항목에 대해 다음과 같이 변환하세요:
+                        - 속담/관용어는 그 뜻을 자연스럽게 문장에 맞게 설명하세요.
+                        예시) 입력: 배가 불렀네? / 출력: 지금 가진 걸 당연하게 생각하는 거야?
+                        예시) 입력: 손이 크다 / 출력: 씀씀이가 후하다.
+                        - 방언은 표준어로 바꾸세요.
+                        예시) 입력: 니 오늘 뭐하노? / 출력: 너 오늘 뭐 해?
+                        예시) 입력: 정구지 / 출력: 부추
+                        - 어려운 단어는 초등학교 1~2학년이 이해할 수 있는 쉬운 말로 바꾸세요.
+                        예시) 입력: 당신의 요청은 거절되었습니다. 추가 서류를 제출하세요. / 출력: 당신의 요청은 안 됩니다. 서류를 더 내야 합니다.
+                        - 줄임말은 풀어 쓴 문장으로 바꾸세요.
+                        예시) 입력: 할많하않 / 출력: 할 말은 많지만 하지 않겠어
+
+                        다음은 반드시 지켜주세요:
+                        - 변환된 문장 또는 단어만 출력하세요.
+                        - 설명을 덧붙이지 마세요.
+                        - 의문문이 들어오면, 절대 대답하지 마세요.
+                          질문 형태를 그대로 유지하면서 쉬운 단어로 바꾸세요.
+                          예시) 입력: 국무총리는 어떻게 임명돼? / 출력: 국무총리는 어떻게 정해?
+                    """
                 },
                 {
                     "role": "user",
                     "content": f"""
-                        Translate the following Korean sentence into simpler Korean.
-                        Also provide romanized pronunciation for the original and simplified Korean using the Revised Romanization of Korean system.
-                        Then, provide an English translation for the simplified Korean.
-                        Finally, extract important keywords from the original sentence and provide a dictionary definition (Korean and English translation) and part of speech for each keyword.
+                        다음 한국어 문장을 쉬운 한국어로 번역하세요.
+                        또한 원문과 쉬운 한국어 문장에 대해 국어의 로마자 표기법에 따라 로마자 발음을 제공하세요.
+                        그 다음, 쉬운 한국어 문장의 영어 번역을 제공하세요.
+                        마지막으로, 원문 문장에서 중요한 키워드를 추출하고 각 키워드에 대한 한국어 사전 정의(한국어 및 영어 번역)와 품사를 제공하세요.
+                        단순화할 때는 원래 의미를 가능한 한 유지하되, 한국어 학습자에게 적합한 더 쉬운 어휘와 문장 구조를 사용하세요.
+                        출력은 지정된 JSON 형식으로 엄격하게 준수해야 합니다.
 
-                        Original Korean sentence: "{input_text}"
+                        원문 한국어 문장: "{input_text}"
 
-                        Output must be in JSON format:
+                        출력은 JSON 형식이어야 합니다:
                         {{
                             "original_text": "원문 한국어 문장",
                             "original_romanized_pronunciation": "원문 한국어 로마자 발음",
@@ -334,46 +362,11 @@ async def get_korean_dictionary_entry(word: str, pos: str) -> Union[Dict, None]:
             print("[WARN] KOREAN_DICT_API_KEY가 없어 사전 검색을 건너뜝니다.")
             return None
 
-        # Google 사전 API를 가정
-        # 실제 사용하려는 사전 API의 엔드포인트와 파라미터에 맞게 수정 필요
-        # 예시: '단어' 검색 시
-        # https://www.google.com/search?q=define+한국어+단어
-        # 이 예시에서는 실제 동작하는 API가 아님. 실제 사전 API를 사용해야 함.
-        # NIKL (국립국어원) 한국어 지식대사전 API 사용 가능 (API 키 필요)
-        # NIKL API 예시 (실제 API 명세에 따라 달라질 수 있음):
-        # https://stdict.korean.go.kr/api/search.do?key={API_KEY}&q={word}
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            # 여기는 KOREAN_DICT_API_KEY를 사용하는 실제 사전 API 엔드포인트여야 합니다.
-            # 이 코드는 예시일 뿐, 실제 사전 API 명세를 따르지 않습니다.
-            # 임시로 API 호출을 시뮬레이션하거나, 실제 유효한 사전 API로 대체해야 합니다.
-            # 현재 코드에서 실제 외부 사전 API 호출 로직은 구현되어 있지 않고,
-            # OpenAI가 제공하는 "keyword_dictionary"를 그대로 사용하고 있습니다.
-            # 따라서 이 함수는 현재 작동하지 않을 가능성이 높습니다.
-            # 만약 KOREAN_DICT_API_KEY가 실제로 외부 사전 API를 호출하는 용도라면
-            # 여기에 해당 API 호출 로직을 구현해야 합니다.
-            # 지금은 OpenAI가 제공한 키워드 사전만 사용한다고 가정하고 이 함수는
-            # 더미 데이터를 반환하거나 OpenAI 응답을 그대로 사용하도록 처리해야 합니다.
-
-            # 현재 코드의 흐름상, OpenAI에서 키워드와 정의를 받아오므로
-            # 이 함수는 필요 없을 수 있습니다.
-            # 만약 더 상세한 정의를 위해 외부 사전 API를 호출하려면 여기에 구현.
-            # 지금은 해당 API 호출이 없으므로 항상 None을 반환하거나, OpenAI 응답을 그대로 사용해야 합니다.
-
-            # 이 함수는 현재 사용되지 않거나, OpenAI 응답에서 받은 데이터를
-            # 그대로 반환하도록 수정해야 할 가능성이 있습니다.
-            # 예시: OpenAI가 제공한 dictionary 데이터를 그대로 반환
-            # return {"word": word, "pos": pos, "definitions": [{"definition": "뜻풀이 (OpenAI)", "english_translation": "meaning (OpenAI)"}]}
-            pass # 실제 사전 API 호출 로직 없음
-
-
         # TODO: 실제 사전 API 응답 파싱 및 반환 로직 구현
-        # 현재는 이 함수가 사용되지 않거나, OpenAI 응답에서 받은 데이터를 그대로
-        # 반환하도록 변경해야 할 가능성이 높습니다.
-        # 또는 NIKL API 등을 사용하여 추가 정보 가져오기.
-        # 이 부분은 주석 처리되어 있거나, 의미 없는 API 호출이 되어 있습니다.
-        # OpenAI가 이미 키워드 사전을 제공하므로,
-        # 추가적인 외부 사전 API 호출이 필요하지 않다면 이 함수는 삭제해도 됩니다.
+        # 현재 코드의 흐름상, OpenAI에서 키워드와 정의를 받아오므로
+        # 이 함수는 필요 없을 수 있습니다.
+        # 만약 더 상세한 정의를 위해 외부 사전 API를 호출하려면 여기에 구현.
+        # 지금은 해당 API 호출이 없으므로 항상 None을 반환하거나, OpenAI 응답을 그대로 사용해야 합니다.
 
         # 임시로 더미 데이터를 반환하거나 None 반환
         return {"word": word, "pos": pos, "definitions": [{"definition": "사전 뜻풀이 (API 미구현)", "english_translation": "Dictionary meaning (API not implemented)"}], "api_call_time": asyncio.get_event_loop().time() - start_time}
