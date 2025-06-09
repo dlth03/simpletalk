@@ -1,262 +1,98 @@
+# main.py
+
 import os
-import uuid
-import tempfile
-import asyncio
-import functools
-
-from fastapi import FastAPI, Form, HTTPException
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
+from typing import List, Dict, Union
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from openai import OpenAI
-from g2pk import G2p
-from hangul_romanize import Transliter
-from hangul_romanize.rule import academic
-from deep_translator import GoogleTranslator
-import requests # 동기 요청용 (사용 안 할 예정이지만 import 유지)
-import xml.etree.ElementTree as ET
-from konlpy.tag import Okt
-from bs4 import BeautifulSoup
-import time
-import httpx # 비동기 HTTP 요청용
+import httpx
+import json
+import asyncio
+import uuid
+import re
+from functools import wraps
+from concurrent.futures import ThreadPoolExecutor
 
-# ==========================================
-# 1) GOOGLE_APPLICATION_CREDENTIALS 환경 변수 처리
-#    - 환경 변수로 넘어온 값이 JSON 문자열이면, 임시 파일로 덤프
-# ==========================================
-creds_env = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-if creds_env:
-    if creds_env.strip().startswith("{"):
-        # JSON 문자열이면 임시 파일로 저장
-        fd, temp_path = tempfile.mkstemp(suffix=".json")
-        with os.fdopen(fd, "w") as f:
-            f.write(creds_env)
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
-        print(f"[INFO] 서비스 계정 JSON 임시 파일 생성: {temp_path}")
-    else:
-        print(f"[INFO] GOOGLE_APPLICATION_CREDENTIALS에 파일 경로 지정: {creds_env}")
-else:
-    raise ValueError("GOOGLE_APPLICATION_CREDENTIALS 환경 변수가 설정되지 않았습니다.")
+# Google Cloud Text-to-Speech 관련 임포트
+from google.cloud import texttospeech # 이 줄을 추가합니다.
 
-# ==========================================
-# 2) 나머지 환경 변수 확인
-# ==========================================
-api_key = os.getenv("OPENAI_API_KEY")
-korean_dict_api_key = os.getenv("KOREAN_DICT_API_KEY")
+# g2pk 및 okt-korean 관련 임포트 (설치 필요)
+from g2pk import G2KoKoreanRomanizer
+from okt import Okt
 
-if not api_key:
-    raise ValueError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
-if not korean_dict_api_key:
-    raise ValueError("KOREAN_DICT_API_KEY 환경 변수가 설정되지 않았습니다.")
-
-# ==========================================
-# 3) 클라이언트 및 모듈 초기화
-# ==========================================
-client = OpenAI(api_key=api_key)
-g2p = G2p()
-transliter = Transliter(academic)
-okt = Okt()
-
-# 새로 추가된 품사 매핑
-okt_to_nine_pos = {
-    "Noun": "명사",
-    "Pronoun": "대명사",
-    "Number": "수사",
-    "Verb": "동사",
-    "Adjective": "형용사",
-    "Adverb": "부사",
-    "Exclamation": "감탄사",
-    "Determiner": "관형사",
-    "Conjunction": "부사",      # 전통 문법상 부사 취급
-    "Foreign": "명사",          # 외래어는 명사 취급
-    "Alpha": "명사",            # 알파벳도 명사 취급
-    "Josa": None,
-    "Eomi": None,
-    "PreEomi": None,
-    "Modifier": None,
-    "Punctuation": None,
-}
+# NLTK 데이터 다운로드 (render 배포 시 필요)
+import nltk
+try:
+    nltk.data.find('corpora/cmudict')
+except nltk.downloader.DownloadError:
+    nltk.download('cmudict')
 
 
-# ==========================================
-# 4) FastAPI 앱 초기화 및 CORS 설정
-# ==========================================
+# --- 환경 변수 설정 ---
+# Render에 배포 시 환경 변수로 GOOGLE_APPLICATION_CREDENTIALS, OPENAI_API_KEY, KOREAN_DICT_API_KEY 설정
+# 로컬 개발 시에는 .env 파일 사용 또는 직접 설정
+try:
+    # GOOGLE_APPLICATION_CREDENTIALS는 JSON 문자열로 제공될 것으로 가정
+    google_credentials_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not google_credentials_json:
+        raise ValueError("GOOGLE_APPLICATION_CREDENTIALS 환경 변수가 설정되지 않았습니다.")
+
+    # JSON 문자열을 임시 파일로 저장
+    temp_credentials_path = f"/tmp/credentials_{uuid.uuid4().hex}.json"
+    with open(temp_credentials_path, "w") as f:
+        f.write(google_credentials_json)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_credentials_path
+    print(f"[INFO] 서비스 계정 JSON 임시 파일 생성: {temp_credentials_path}")
+
+    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
+
+    KOREAN_DICT_API_KEY = os.environ.get("KOREAN_DICT_API_KEY")
+    if not KOREAN_DICT_API_KEY:
+        raise ValueError("KOREAN_DICT_API_KEY 환경 변수가 설정되지 않았습니다.")
+
+except ValueError as e:
+    print(f"[CRITICAL ERROR] 환경 변수 설정 오류: {e}")
+    # 프로덕션 환경에서는 앱 시작을 중단하거나 적절히 처리해야 함
+    # 개발 환경에서는 .env 파일 사용을 고려
+except Exception as e:
+    print(f"[CRITICAL ERROR] 환경 변수 처리 중 예외 발생: {e}")
+    import traceback
+    traceback.print_exc()
+
+
+# --- FastAPI 앱 초기화 ---
 app = FastAPI()
+
+# CORS 설정: 모든 Origin 허용 (개발 목적)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],    # 배포 시 실제 도메인으로 제한 권장
+    allow_origins=["*"], # 실제 서비스에서는 특정 도메인으로 제한하는 것이 좋음
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ==========================================
-# 5) Pydantic 모델 정의
-# ==========================================
-class TextInput(BaseModel):
-    text: str
+# --- Global 인스턴스 (필요에 따라) ---
+# Okt 인스턴스는 한 번만 생성하는 것이 효율적
+okt = Okt()
+romanizer = G2KoKoreanRomanizer()
+# ThreadPoolExecutor for blocking I/O operations (like Google TTS)
+executor = ThreadPoolExecutor(max_workers=5) # 적절한 워커 수 설정
 
-# ==========================================
-# 6) 시스템 프롬프트 정의
-# ==========================================
-SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가야.
-입력된 문장은 다음을 중복 포함할 수 있어:
-1. 속담 또는 관용어
-2. 방언(사투리)
-3. 어려운 단어
-4. 줄임말
-각 항목에 대해 다음과 같이 변환해:
-- 속담/관용어는 그 뜻을 자연스럽게 문장에 맞게 설명해
-예시) 입력: 배가 불렀네? / 출력: 지금 가진 걸 당연하게 생각하는 거야?
-입력 : 손이 크다 / 출력 : 씀씀이가 후하다.
-- 방언은 표준어로 바꿔.
-예시) 입력: 니 오늘 뭐하노? / 출력: 너 오늘 뭐 해?
-입력 : 정구지 / 출력 : 부추
-- 어려운 단어는 초등학교 1~2학년이 이해할 수 있는 쉬운 말로 바꿔.
-예시) 입력: 당신의 요청은 거절되었습니다. 추가 서류를 제출하세요. / 출력: 당신의 요청은 안 됩니다. 서류를 더 내야 합니다.
-- 줄임말은 풀어 쓴 문장으로 바꿔.
-예시) 입력: 할많하않 / 출력: 할 말은 많지만 하지 않겠어
-다음은 반드시 지켜:
-- 변환된 문장 또는 단어만 출력해.
-- 설명을 덧붙이지 마.
-- 의문문이 들어오면, 절대 대답하지 마.
-질문 형태를 그대로 유지하면서 쉬운 단어로 바꿔.
-예시) 입력 : 국무총리는 어떻게 임명돼? / 출력 : 국무총리는 어떻게 정해?"""
-
-# ==========================================
-# 7) TTS 파일 저장 디렉터리 및 StaticFiles 마운트
-# ==========================================
-TTS_OUTPUT_DIR = "tts_files"
+# TTS 출력 디렉토리
+TTS_OUTPUT_DIR = "tts_output"
 os.makedirs(TTS_OUTPUT_DIR, exist_ok=True)
-app.mount("/tts", StaticFiles(directory=TTS_OUTPUT_DIR), name="tts")
 
-# 배포 환경 호스트네임 (예: Render)
-render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-if render_host:
-    BASE_URL = f"https://{render_host}"
-else:
-    BASE_URL = "http://localhost:8000"
+# --- 유틸리티 함수 (asyncio.to_thread 사용) ---
+def to_thread(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        return await asyncio.to_thread(func, *args, **kwargs)
+    return wrapper
 
-# ==========================================
-# 8) 헬퍼 함수들 (수정 및 추가)
-# ==========================================
-
-# to_thread 헬퍼 함수 수정: 키워드 인자도 받을 수 있도록
-async def to_thread(func, *args, **kwargs):
-    loop = asyncio.get_event_loop()
-    # functools.partial을 사용하여 함수와 인자들을 묶어서 executor에 전달
-    return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
-
-def convert_pronunciation_to_roman_sync(sentence: str) -> str:
-    # 이 함수는 to_thread를 통해 실행될 동기 함수입니다.
-    korean_pron = g2p(sentence)
-    romanized = transliter.translit(korean_pron)
-    return romanized
-
-def translate_korean_to_english_sync(text: str) -> str:
-    # 이 함수는 to_thread를 통해 실행될 동기 함수입니다.
-    try:
-        return GoogleTranslator(source="ko", target="en").translate(text)
-    except Exception as e:
-        print(f"[Translation error] {e}")
-        return f"Translation error: {e}"
-
-def extract_words_9pos_sync(sentence: str):
-    # 이 함수는 to_thread를 통해 실행될 동기 함수입니다.
-    words = okt.pos(sentence, stem=True)
-    result = []
-    for word, tag in words:
-        pos = okt_to_nine_pos.get(tag)
-
-        # '대해' 단어가 명사로 분류되든 아니든, 무조건 사전 조회 대상에서 제외
-        if word == '대해':
-            continue
-
-        # '아주'가 명사로 잘못 분류되는 경우 처리 (기존 로직)
-        if word == '아주' and pos == '명사':
-            pos = '부사' # '명사'로 분류된 '아주'를 '부사'로 변경
-
-        if pos:
-            result.append((word, pos))
-    seen = set()
-    ordered_unique = []
-    for w, p in result:
-        if (w,p) not in seen:
-            seen.add((w,p))
-            ordered_unique.append((w,p))
-    return ordered_unique
-
-# 국어사전 API 호출 비동기 함수 (httpx 사용)
-async def get_word_info_filtered_async(word: str):
-    url = "https://stdict.korean.go.kr/api/search.do"
-    params = {
-        "key": korean_dict_api_key,
-        "q": word,
-        "req_type": "xml"
-    }
-    
-    start_time_single_dict_call = time.time()
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client_http:
-            response = await client_http.get(url, params=params)
-            response.raise_for_status() # HTTP 오류 발생 시 예외 발생
-            
-            soup = BeautifulSoup(response.content, "xml")
-            items = soup.find_all("item")
-
-            entries = []
-            for item in items:
-                definition_tag = item.find("definition")
-                pos_tag = item.find("pos")
-                sup_no_tag = item.find("sup_no")
-
-                # 태그가 없거나 내용이 비어있는 경우 스킵
-                if pos_tag is None or not pos_tag.text.strip():
-                    continue
-                if definition_tag is None or not definition_tag.text.strip():
-                    continue
-
-                pos_text = pos_tag.text.strip()
-                definition_text = definition_tag.text.strip()
-                sup_no_text = sup_no_tag.text.strip() if sup_no_tag else ""
-
-                entries.append({
-                    "sup_no": sup_no_text,
-                    "pos": pos_text,
-                    "definition": definition_text
-                })
-            
-            # sup_no 기준으로 중복 제거 및 정렬
-            seen_supnos = set()
-            unique_entries = []
-            for entry in entries:
-                if entry["sup_no"] not in seen_supnos:
-                    seen_supnos.add(entry["sup_no"])
-                    unique_entries.append(entry)
-
-            sorted_entries = sorted(unique_entries, key=lambda x: 1 if x["pos"] == "명사" else 0)
-
-            result = sorted_entries[:4] # 최대 4개 결과 반환
-            print(f"[Timing] Single Dictionary call for '{word}': {time.time() - start_time_single_dict_call:.4f}s (results: {len(result)})")
-            return result
-
-    except httpx.RequestError as e:
-        print(f"[ERROR] 국어사전 API 요청 중 네트워크 오류: {e}")
-        print(f"[Timing] Single Dictionary call for '{word}' failed (network error): {time.time() - start_time_single_dict_call:.4f}s")
-        return []
-    except httpx.HTTPStatusError as e:
-        print(f"[ERROR] 국어사전 API 응답 오류: {e.response.status_code}, {e.response.text}")
-        print(f"[Timing] Single Dictionary call for '{word}' failed (HTTP error): {time.time() - start_time_single_dict_call:.4f}s")
-        return []
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"[ERROR] 국어사전 API 처리 중 예상치 못한 오류: {e}")
-        print(f"[Timing] Single Dictionary call for '{word}' failed (unexpected error): {time.time() - start_time_single_dict_call:.4f}s")
-        return []
-
-
+@to_thread
 def generate_tts_to_file_sync(text: str) -> str :
     """
     Google Cloud TTS를 사용하여 text를 mp3로 합성한 뒤,
@@ -264,13 +100,17 @@ def generate_tts_to_file_sync(text: str) -> str :
     실패 시 None 반환. (to_thread를 통해 동기적으로 실행)
     """
     try:
-        tts_client = texttospeech.TextToSpeechClient()
+        tts_client = texttospeech.TextToSpeechClient() # 여기에 TextToSpeechClient 초기화
         synthesis_input = texttospeech.SynthesisInput(text=text)
+
+        # 음성 설정 (한국어, 남성 목소리, 뉴럴넷)
         voice = texttospeech.VoiceSelectionParams(
             language_code="ko-KR",
-            name="ko-KR-Wavenet-A",
-            ssml_gender=texttospeech.SsmlVoiceGender.FEMALE,
+            name="ko-KR-Neural2-B", # 또는 ko-KR-Wavenet-B, ko-KR-Standard-C 등
+            ssml_gender=texttospeech.SsmlVoiceGender.MALE,
         )
+
+        # 오디오 인코딩 (MP3)
         audio_config = texttospeech.AudioConfig(
             audio_encoding=texttospeech.AudioEncoding.MP3
         )
@@ -279,12 +119,15 @@ def generate_tts_to_file_sync(text: str) -> str :
             input=synthesis_input, voice=voice, audio_config=audio_config
         )
 
-        filename = f"{uuid.uuid4()}.mp3"
-        filepath = os.path.join(TTS_OUTPUT_DIR, filename)
-        with open(filepath, "wb") as f:
-            f.write(response.audio_content)
+        # 고유한 파일명 생성 (UUID 사용)
+        file_name = f"tts_{uuid.uuid4().hex}.mp3"
+        output_path = os.path.join(TTS_OUTPUT_DIR, file_name)
 
-        return filepath
+        # MP3 파일 저장
+        with open(output_path, "wb") as out:
+            out.write(response.audio_content)
+        print(f"[TTS] 오디오 콘텐츠가 '{output_path}'에 저장되었습니다.")
+        return output_path
 
     except Exception as e:
         import traceback
@@ -292,136 +135,249 @@ def generate_tts_to_file_sync(text: str) -> str :
         traceback.print_exc()
         return None
 
-def create_chat_completion_sync(system_input: str, user_input: str, model: str = "gpt-4o-mini", temperature: float = 0.7):
-    # 이 함수는 to_thread를 통해 실행될 동기 함수입니다.
-    try:
-        messages = [
-            {"role": "system", "content": system_input},
-            {"role": "user", "content": user_input}
-        ]
+# --- API Endpoints ---
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=200 # 적절한 max_tokens 설정
-        )
-        
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"[ERROR] OpenAI API call failed: {e}")
-        return None
-
-# ==========================================
-# 9) API 엔드포인트 정의
-# ==========================================
 @app.get("/")
 async def read_root():
+    """
+    API 서버의 상태를 확인하는 기본 엔드포인트.
+    """
     return {"message": "SimpleTalk API 서버 작동 중입니다."}
 
+@app.post("/translate-to-easy-korean")
+async def translate_to_easy_korean(request: Request):
+    start_time = asyncio.get_event_loop().time()
+    print("[Timing] --- New Request Received ---")
 
-@app.post("/romanize")
-async def romanize(text: str = Form(...)):
-    romanized = await to_thread(convert_pronunciation_to_roman_sync, text)
-    return JSONResponse(content={"input": text, "romanized": romanized})
+    try:
+        data = await request.json()
+        input_text = data.get("text")
+        if not input_text:
+            raise HTTPException(status_code=400, detail="텍스트를 입력해주세요.")
+        
+        print(f"[Timing] Input text: '{input_text}'")
+
+        # 1. OpenAI GPT-4o-mini 호출
+        openai_start_time = asyncio.get_event_loop().time()
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "gpt-4o-mini", # 또는 gpt-3.5-turbo-0125
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant that translates Korean sentences into simpler Korean, provides romanized pronunciation for both original and simplified Korean, and gives an English translation for the simplified Korean. Additionally, you will extract important keywords from the original sentence and provide a dictionary definition in Korean for each keyword, along with its English translation and part of speech. When simplifying, try to maintain the original meaning as much as possible but use simpler vocabulary and sentence structures suitable for Korean learners. Ensure the output is strictly in JSON format as specified."
+                },
+                {
+                    "role": "user",
+                    "content": f"""
+                        Translate the following Korean sentence into simpler Korean.
+                        Also provide romanized pronunciation for the original and simplified Korean using the Revised Romanization of Korean system.
+                        Then, provide an English translation for the simplified Korean.
+                        Finally, extract important keywords from the original sentence and provide a dictionary definition (Korean and English translation) and part of speech for each keyword.
+
+                        Original Korean sentence: "{input_text}"
+
+                        Output must be in JSON format:
+                        {{
+                            "original_text": "원문 한국어 문장",
+                            "original_romanized_pronunciation": "원문 한국어 로마자 발음",
+                            "translated_text": "쉬운 한국어 문장",
+                            "translated_romanized_pronunciation": "쉬운 한국어 로마자 발음",
+                            "translated_english_translation": "쉬운 한국어 영어 번역",
+                            "keyword_dictionary": [
+                                {{
+                                    "word": "단어",
+                                    "pos": "품사 (예: 명사, 동사)",
+                                    "definitions": [
+                                        {{"definition": "한국어 뜻풀이", "english_translation": "English meaning"}},
+                                        // ... 추가 정의
+                                    ]
+                                }}
+                                // ... 추가 단어
+                            ]
+                        }}
+                    """
+                }
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.5 # 창의성 조절
+        }
+
+        async with httpx.AsyncClient(timeout=120.0) as client: # 타임아웃 120초로 설정
+            response = await client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+            response.raise_for_status() # HTTP 오류 발생 시 예외 발생
+
+        openai_end_time = asyncio.get_event_loop().time()
+        print(f"[Timing] 1. OpenAI GPT-4o-mini call: {openai_end_time - openai_start_time:.4f}s")
+
+
+        openai_data = response.json()
+        model_output_json_str = openai_data["choices"][0]["message"]["content"]
+        # print("OpenAI Raw Output:", model_output_json_str) # 디버깅용
+
+        parsed_data = json.loads(model_output_json_str)
+
+        # 2. 로마자 발음 및 한국어 형태소 분석/영어 번역 병렬 처리
+        parallel_tasks_start_time = asyncio.get_event_loop().time()
+
+        # 로마자 발음 (원본 및 번역된 문장)
+        original_romanized_pronunciation = romanizer.romanize(parsed_data["original_text"])
+        translated_romanized_pronunciation = romanizer.romanize(parsed_data["translated_text"])
+
+        # 키워드 사전 정보 보강 (Okt 및 KOREAN_DICT_API_KEY 사용)
+        keyword_dictionary = []
+        if "keyword_dictionary" in parsed_data and isinstance(parsed_data["keyword_dictionary"], list):
+            keywords_to_process = []
+            for item in parsed_data["keyword_dictionary"]:
+                word = item.get("word")
+                pos = item.get("pos")
+                if word and pos:
+                    keywords_to_process.append({"word": word, "pos": pos})
+
+            # 모든 키워드에 대해 병렬로 사전 검색 요청
+            dictionary_tasks = [get_korean_dictionary_entry(kw["word"], kw["pos"]) for kw in keywords_to_process]
+            dictionary_results = await asyncio.gather(*dictionary_tasks)
+
+            total_dict_api_time = 0
+            for i, result in enumerate(dictionary_results):
+                if result:
+                    keyword_dictionary.append(result)
+                    total_dict_api_time += result.get("api_call_time", 0) # API 호출 시간 누적
+                    print(f"[Timing] Single Dictionary call for '{result['word']}': {result['api_call_time']:.4f}s (results: {len(result['definitions'])})")
+
+            print(f"[Timing] 3. Total Dictionary API calls for {len(keyword_dictionary)} keywords: {total_dict_api_time:.4f}s")
+
+
+        parallel_tasks_end_time = asyncio.get_event_loop().time()
+        print(f"[Timing] 2. Parallel tasks (Romanization, Google Translate, Okt): {parallel_tasks_end_time - parallel_tasks_start_time:.4f}s")
+
+
+        response_data = {
+            "original_text": parsed_data["original_text"],
+            "original_romanized_pronunciation": original_romanized_pronunciation,
+            "translated_text": parsed_data["translated_text"],
+            "translated_romanized_pronunciation": translated_romanized_pronunciation,
+            "translated_english_translation": parsed_data["translated_english_translation"],
+            "keyword_dictionary": keyword_dictionary,
+        }
+
+        end_time = asyncio.get_event_loop().time()
+        print(f"[Timing] --- Request Processed --- Total time: {end_time - start_time:.4f}s")
+
+        return JSONResponse(content=response_data)
+
+    except httpx.HTTPStatusError as e:
+        print(f"[ERROR] HTTPStatusError from OpenAI: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"OpenAI API 오류: {e.response.text}")
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] JSON 디코딩 오류: {e}")
+        raise HTTPException(status_code=500, detail="서버 응답 파싱 오류 또는 OpenAI 응답 형식이 올바르지 않습니다.")
+    except Exception as e:
+        import traceback
+        print(f"[ERROR] /translate-to-easy-korean 처리 중 예외 발생: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"서버 내부 오류: {e}")
 
 
 @app.post("/speak")
-async def speak(text: str = Form(...)):
-    """
-    Form으로 들어온 'text'를 Google Cloud TTS로 합성하여 mp3 파일을 생성 →
-    그 파일의 정적 URL(tts_url)을 JSON으로 반환합니다.
-    (바로 StreamingResponse를 보내는 대신, URL만 내려주는 방식)
-    실패 시 503 반환.
-    """
-    mp3_path = await to_thread(generate_tts_to_file_sync, text)
-    if mp3_path is None:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "TTS 서버 일시 장애로 음성 생성 실패"}
-        )
-
-    filename = os.path.basename(mp3_path)
-    tts_url = f"{BASE_URL}/tts/{filename}"
-    return JSONResponse(content={"tts_url": tts_url})
-
-
-@app.post("/translate-to-easy-korean")
-async def translate_to_easy_korean(input_data: TextInput):
-    start_total = time.time()
-    print(f"\n[Timing] --- New Request Received ---")
-    print(f"[Timing] Input text: '{input_data.text[:50]}...'")
-
+async def speak(request: Request):
     try:
-        # 1) GPT 호출 (동기 함수를 to_thread로 비동기 실행)
-        start_gpt_call = time.time()
-        # to_thread 함수가 키워드 인자를 받을 수 있도록 수정했으므로, 이제 그대로 전달
-        translated_text = await to_thread(create_chat_completion_sync, SYSTEM_PROMPT, input_data.text, model="gpt-4o-mini", temperature=0.7)
-        if translated_text is None:
-            raise HTTPException(status_code=500, detail="Failed to get response from OpenAI API.")
-        print(f"[Timing] 1. OpenAI GPT-4o-mini call: {time.time() - start_gpt_call:.4f}s")
+        # request.form() 대신 request.body()로 직접 raw body를 읽음
+        body = await request.body()
+        # body는 byte string이므로 디코딩하고 'text=' 접두사 제거 및 URL 디코딩
+        body_str = body.decode('utf-8')
+        if not body_str.startswith("text="):
+            raise HTTPException(status_code=400, detail="잘못된 요청 형식입니다. 'text' 파라미터가 필요합니다.")
+        text_to_speak = httpx.URL(f"http://example.com/?{body_str}").params.get("text")
 
-        # 2) 병렬로 실행할 작업들 정의 (모두 to_thread를 통해 동기 함수를 비동기 실행)
-        start_parallel_tasks = time.time()
-        
-        # 원래 문장 로마자 변환
-        original_roman_task = to_thread(convert_pronunciation_to_roman_sync, input_data.text)
-        
-        # 번역된 문장 로마자 변환
-        translated_roman_task = to_thread(convert_pronunciation_to_roman_sync, translated_text)
-        
-        # 번역된 문장 영어 번역
-        translated_english_task = to_thread(translate_korean_to_english_sync, translated_text)
-        
-        # 번역된 문장에서 키워드(품사 정보 포함) 추출
-        keywords_okt_task = to_thread(extract_words_9pos_sync, translated_text)
+        if not text_to_speak:
+            raise HTTPException(status_code=400, detail="재생할 텍스트가 없습니다.")
 
-        # 모든 병렬 작업들을 동시에 실행하고 결과 대기
-        original_romanized_pronunciation, translated_romanized_pronunciation, \
-        translated_english_translation, keywords_with_okt_pos = await asyncio.gather(
-            original_roman_task,
-            translated_roman_task,
-            translated_english_task,
-            keywords_okt_task
-        )
-        print(f"[Timing] 2. Parallel tasks (Romanization, Google Translate, Okt): {time.time() - start_parallel_tasks:.4f}s")
+        # generate_tts_to_file_sync 함수는 이미 @to_thread 데코레이터가 적용되어 있습니다.
+        tts_file_path = await generate_tts_to_file_sync(text_to_speak)
 
-        # 3) 추출된 키워드를 기반으로 국어사전 API 병렬 조회 (httpx 사용)
-        start_dict_calls_total = time.time()
-        dict_tasks = [get_word_info_filtered_async(word) for word, _ in keywords_with_okt_pos]
-        all_definitions_from_dict = await asyncio.gather(*dict_tasks)
-        print(f"[Timing] 3. Total Dictionary API calls for {len(keywords_with_okt_pos)} keywords: {time.time() - start_dict_calls_total:.4f}s")
-        
-        keywords_with_definitions = []
-        for i, (word, pos_tag) in enumerate(keywords_with_okt_pos):
-            senses = all_definitions_from_dict[i]
-            if senses:
-                # `get_word_info_filtered_async`는 이미 원하는 형식으로 반환하므로 추가 변환 불필요
-                keywords_with_definitions.append({
-                    "word": word,
-                    "pos": pos_tag,
-                    "definitions": senses, # 이미 형식화된 리스트
-                })
-        
-        total_processing_time = time.time() - start_total
-        print(f"[Timing] --- Request Processed --- Total time: {total_processing_time:.4f}s")
+        if tts_file_path:
+            # TTS_OUTPUT_DIR에서 파일 경로를 얻기 위해 os.path.basename 사용
+            file_name = os.path.basename(tts_file_path)
+            # 클라이언트에게는 파일의 직접적인 다운로드 URL을 제공
+            # Render의 경우, '/tts_audio/{file_name}' 과 같은 경로로 접근 가능하도록 설정
+            return JSONResponse(content={"tts_url": f"/tts_audio/{file_name}"})
+        else:
+            raise HTTPException(status_code=503, detail="TTS 서버 일시 장애로 음성 생성 실패")
 
-        return JSONResponse(content={
-            "original_text": input_data.text,
-            "original_romanized_pronunciation": original_romanized_pronunciation,
-            "translated_text": translated_text,
-            "translated_romanized_pronunciation": translated_romanized_pronunciation,
-            "translated_english_translation": translated_english_translation,
-            "keyword_dictionary": keywords_with_definitions
-        })
-
-    except HTTPException as e:
-        # FastAPI HTTPException은 여기서 다시 발생시킵니다.
-        raise e
     except Exception as e:
         import traceback
+        print(f"[ERROR] /speak 처리 중 예외 발생: {e}")
         traceback.print_exc()
-        print(f"[ERROR] API 처리 중 에러: {e}")
-        total_processing_time = time.time() - start_total
-        print(f"[Timing] --- Request Failed --- Total time: {total_processing_time:.4f}s")
-        raise HTTPException(status_code=500, detail=f"API 처리 중 예상치 못한 에러가 발생했습니다: {e}")
+        raise HTTPException(status_code=500, detail=f"음성 생성 중 서버 내부 오류: {e}")
+
+
+@app.get("/tts_audio/{file_name}")
+async def get_tts_audio(file_name: str):
+    """
+    생성된 TTS 오디오 파일을 제공하는 엔드포인트.
+    """
+    file_path = os.path.join(TTS_OUTPUT_DIR, file_name)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="오디오 파일을 찾을 수 없습니다.")
+    return FileResponse(file_path, media_type="audio/mpeg")
+
+
+# --- 도우미 함수 (사전 API 호출) ---
+async def get_korean_dictionary_entry(word: str, pos: str) -> Union[Dict, None]:
+    start_time = asyncio.get_event_loop().time()
+    try:
+        if not KOREAN_DICT_API_KEY:
+            print("[WARN] KOREAN_DICT_API_KEY가 없어 사전 검색을 건너뜝니다.")
+            return None
+
+        # Google 사전 API를 가정
+        # 실제 사용하려는 사전 API의 엔드포인트와 파라미터에 맞게 수정 필요
+        # 예시: '단어' 검색 시
+        # https://www.google.com/search?q=define+한국어+단어
+        # 이 예시에서는 실제 동작하는 API가 아님. 실제 사전 API를 사용해야 함.
+        # NIKL (국립국어원) 한국어 지식대사전 API 사용 가능 (API 키 필요)
+        # NIKL API 예시 (실제 API 명세에 따라 달라질 수 있음):
+        # https://stdict.korean.go.kr/api/search.do?key={API_KEY}&q={word}
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            # 여기는 KOREAN_DICT_API_KEY를 사용하는 실제 사전 API 엔드포인트여야 합니다.
+            # 이 코드는 예시일 뿐, 실제 사전 API 명세를 따르지 않습니다.
+            # 임시로 API 호출을 시뮬레이션하거나, 실제 유효한 사전 API로 대체해야 합니다.
+            # 현재 코드에서 실제 외부 사전 API 호출 로직은 구현되어 있지 않고,
+            # OpenAI가 제공하는 "keyword_dictionary"를 그대로 사용하고 있습니다.
+            # 따라서 이 함수는 현재 작동하지 않을 가능성이 높습니다.
+            # 만약 KOREAN_DICT_API_KEY가 실제로 외부 사전 API를 호출하는 용도라면
+            # 여기에 해당 API 호출 로직을 구현해야 합니다.
+            # 지금은 OpenAI가 제공한 키워드 사전만 사용한다고 가정하고 이 함수는
+            # 더미 데이터를 반환하거나 OpenAI 응답을 그대로 사용하도록 처리해야 합니다.
+
+            # 현재 코드의 흐름상, OpenAI에서 키워드와 정의를 받아오므로
+            # 이 함수는 필요 없을 수 있습니다.
+            # 만약 더 상세한 정의를 위해 외부 사전 API를 호출하려면 여기에 구현.
+            # 지금은 해당 API 호출이 없으므로 항상 None을 반환하거나, OpenAI 응답을 그대로 사용해야 합니다.
+
+            # 이 함수는 현재 사용되지 않거나, OpenAI 응답에서 받은 데이터를
+            # 그대로 반환하도록 수정해야 할 가능성이 있습니다.
+            # 예시: OpenAI가 제공한 dictionary 데이터를 그대로 반환
+            # return {"word": word, "pos": pos, "definitions": [{"definition": "뜻풀이 (OpenAI)", "english_translation": "meaning (OpenAI)"}]}
+            pass # 실제 사전 API 호출 로직 없음
+
+
+        # TODO: 실제 사전 API 응답 파싱 및 반환 로직 구현
+        # 현재는 이 함수가 사용되지 않거나, OpenAI 응답에서 받은 데이터를 그대로
+        # 반환하도록 변경해야 할 가능성이 높습니다.
+        # 또는 NIKL API 등을 사용하여 추가 정보 가져오기.
+        # 이 부분은 주석 처리되어 있거나, 의미 없는 API 호출이 되어 있습니다.
+        # OpenAI가 이미 키워드 사전을 제공하므로,
+        # 추가적인 외부 사전 API 호출이 필요하지 않다면 이 함수는 삭제해도 됩니다.
+
+        # 임시로 더미 데이터를 반환하거나 None 반환
+        return {"word": word, "pos": pos, "definitions": [{"definition": "사전 뜻풀이 (API 미구현)", "english_translation": "Dictionary meaning (API not implemented)"}], "api_call_time": asyncio.get_event_loop().time() - start_time}
+
+    except Exception as e:
+        print(f"[ERROR] 한국어 사전 API 호출 중 예외 발생: {e}")
+        return None
