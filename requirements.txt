@@ -7,6 +7,7 @@ g2pk
 hangul-romanize
 deep-translator
 konlpy
+JPype1
 requests
 beautifulsoup4
 httpx
