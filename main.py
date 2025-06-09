@@ -14,8 +14,8 @@ from deep_translator import GoogleTranslator
 import requests
 import xml.etree.ElementTree as ET
 from konlpy.tag import Okt
-from bs4 import BeautifulSoup # <-- 새로 추가된 임포트
-import time # <-- 시간 측정을 위해 time 모듈 임포트
+from bs4 import BeautifulSoup
+import time
 
 # Google Cloud TTS 라이브러리
 from google.cloud import texttospeech
@@ -42,7 +42,7 @@ else:
 # 2) 나머지 환경 변수 확인
 # ==========================================
 api_key = os.getenv("OPENAI_API_KEY")
-korean_dict_api_key = os.getenv("KOREAN_DICT_API_KEY") # <-- 기존 API 키 변수
+korean_dict_api_key = os.getenv("KOREAN_DICT_API_KEY")
 
 if not api_key:
     raise ValueError("OPENAI_API_KEY 환경 변수가 설정되지 않았습니다.")
@@ -73,38 +73,38 @@ class TextInput(BaseModel):
     text: str
 
 # ==========================================
-# 6) 시스템 프롬프트 정의
+# 6) 시스템 프롬프트 정의 (업데이트된 프롬프트 사용)
 # ==========================================
 SYSTEM_PROMPT = """너는 한국어 문장을 단순하게 바꾸는 전문가야.
-입력된 문장은 다음을 포함할 수 있어:
-1. 속담/관용어
+입력된 문장은 다음을 중복 포함할 수 있어:
+1. 속담 또는 관용어
 2. 방언(사투리)
 3. 어려운 단어
 4. 줄임말
 각 항목에 대해 다음과 같이 변환해:
-- 속담/관용어: 그 뜻을 자연스럽게 문장 안에 설명
-  예시) 입력: 배가 불렀네? / 출력: 지금 가진 걸 당연하게 생각하는 거야?
-  예시) 입력: 발 없는 말이 천리간다. / 출력: 소문은 빠르게 퍼진다.
-- 방언: 표준어로 바꾸기
-  예시) 입력: 니 오늘 뭐하노? / 출력: 너 오늘 뭐 해?
-  입력: 정구지 / 출력: 부추
-- 어려운 단어: 초등 1~2학년도 이해할 수 있는 쉬운 말로 바꾸기
-  예시) 입력: 당신의 요청은 거절되었습니다. 추가 서류를 제출하세요.
-        / 출력: 당신의 요청은 안 됩니다. 서류를 더 내야 합니다.
-- 줄임말: 풀어쓴 문장으로 바꾸기
-  예시) 입력: 할많하않 / 출력: 할 말은 많지만 하지 않겠어
-다음은 반드시 지켜야 함:
-- 변환된 문장 또는 단어만 출력
-- 설명 덧붙이지 않기
-- 의문문을 그대로 질문 형태로 유지하면서 쉬운 단어로 바꾸기
-  예시) 입력: 국무총리는 어떻게 임명돼? / 출력: 국무총리는 어떻게 정해?"""
+- 속담/관용어는 그 뜻을 자연스럽게 문장에 맞게 설명해
+예시) 입력: 배가 불렀네? / 출력: 지금 가진 걸 당연하게 생각하는 거야?
+입력 : 손이 크다 / 출력 : 씀씀이가 후하다.
+- 방언은 표준어로 바꿔.
+예시) 입력: 니 오늘 뭐하노? / 출력: 너 오늘 뭐 해?
+입력 : 정구지 / 출력 : 부추
+- 어려운 단어는 초등학교 1~2학년이 이해할 수 있는 쉬운 말로 바꿔.
+예시) 입력: 당신의 요청은 거절되었습니다. 추가 서류를 제출하세요. / 출력: 당신의 요청은 안 됩니다. 서류를 더 내야 합니다.
+- 줄임말은 풀어 쓴 문장으로 바꿔.
+예시) 입력: 할많하않 / 출력: 할 말은 많지만 하지 않겠어
+다음은 반드시 지켜:
+- 변환된 문장 또는 단어만 출력해.
+- 설명을 덧붙이지 마.
+- 의문문이 들어오면, 절대 대답하지 마.
+질문 형태를 그대로 유지하면서 쉬운 단어로 바꿔.
+예시) 입력 : 국무총리는 어떻게 임명돼? / 출력 : 국무총리는 어떻게 정해?"""
 
 # ==========================================
 # 7) 기존 모듈 초기화 (g2pk, hangul-romanize, Okt 등)
 # ==========================================
 g2p = G2p()
 transliter = Transliter(academic)
-okt = Okt() # Okt는 이미 존재하므로 중복 초기화 방지
+okt = Okt()
 
 # 새로 추가된 품사 매핑
 okt_to_nine_pos = {
@@ -178,7 +178,7 @@ def extract_words_9pos(sentence: str):
 
 # 2. 조건에 따라 여러 품사를 허용하도록 수정 (기존 get_valid_senses_excluding_pronoun 대체)
 def get_word_info_filtered(word: str):
-    start_time_single_dict_call = time.time() # <-- 개별 사전 호출 시간 측정 시작
+    start_time_single_dict_call = time.time()
     url = "https://stdict.korean.go.kr/api/search.do"
     params = {
         "key": korean_dict_api_key,
@@ -189,7 +189,7 @@ def get_word_info_filtered(word: str):
     response = requests.get(url, params=params)
     if response.status_code != 200:
         print(f"[ERROR] 국어사전 API 요청 실패: {response.status_code}, {response.text}")
-        print(f"[Timing] Single Dictionary call for '{word}' failed: {time.time() - start_time_single_dict_call:.4f}s") # <-- 실패 시간 로깅
+        print(f"[Timing] Single Dictionary call for '{word}' failed: {time.time() - start_time_single_dict_call:.4f}s")
         return []
 
     soup = BeautifulSoup(response.content, "xml")
@@ -229,11 +229,11 @@ def get_word_info_filtered(word: str):
     sorted_entries = sorted(unique_entries, key=lambda x: 1 if x["pos"] == "명사" else 0)
 
     if not sorted_entries:
-        print(f"[Timing] Single Dictionary call for '{word}' (no results): {time.time() - start_time_single_dict_call:.4f}s") # <-- 결과 없음 시간 로깅
+        print(f"[Timing] Single Dictionary call for '{word}' (no results): {time.time() - start_time_single_dict_call:.4f}s")
         return []
 
-    result = sorted_entries[:4] # 출력할 양 조절(현재 4개 이하로 출력되도록 설정)
-    print(f"[Timing] Single Dictionary call for '{word}': {time.time() - start_time_single_dict_call:.4f}s (results: {len(result)})") # <-- 성공 시간 로깅
+    result = sorted_entries[:4]
+    print(f"[Timing] Single Dictionary call for '{word}': {time.time() - start_time_single_dict_call:.4f}s (results: {len(result)})")
     return result
 
 
@@ -273,7 +273,28 @@ def generate_tts_to_file(text: str) -> str :
         return None
 
 # ==========================================
-# 10) API 엔드포인트 정의
+# 10) OpenAI Chat Completion 헬퍼 함수 (새로 추가)
+# ==========================================
+def create_chat_completion(system_input: str, user_input: str, model: str = "gpt-4o-mini", temperature: float = 0.7):
+    try:
+        messages = [
+            {"role": "system", "content": system_input},
+            {"role": "user", "content": user_input}
+        ]
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+        )
+        
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[ERROR] OpenAI API call failed: {e}")
+        return None
+
+# ==========================================
+# 11) API 엔드포인트 정의
 # ==========================================
 @app.get("/")
 async def read_root():
@@ -308,51 +329,44 @@ async def speak(text: str = Form(...)):
 
 @app.post("/translate-to-easy-korean")
 async def translate_to_easy_korean(input_data: TextInput):
-    start_total = time.time() # <-- 전체 API 처리 시간 측정 시작
+    start_total = time.time()
     print(f"\n[Timing] --- New Request Received ---")
-    print(f"[Timing] Input text: '{input_data.text[:50]}...'") # 긴 텍스트는 잘라서 출력
+    print(f"[Timing] Input text: '{input_data.text[:50]}...'")
 
     try:
         start_romanize_original = time.time()
         original_romanized_pronunciation = convert_pronunciation_to_roman(input_data.text)
         print(f"[Timing] 1. Original Romanization: {time.time() - start_romanize_original:.4f}s")
 
-
         start_gpt_call = time.time()
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": input_data.text},
-        ]
-        response = client.chat.completions.create(
+        # 기존 messages 리스트 대신 create_chat_completion 함수 호출
+        translated_text = create_chat_completion(
+            system_input=SYSTEM_PROMPT,
+            user_input=input_data.text,
             model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.7,
-            max_tokens=150,
+            temperature=0.7 # Your desired temperature
         )
-        translated_text = response.choices[0].message.content.strip()
+        
+        if translated_text is None:
+            raise HTTPException(status_code=500, detail="Failed to get response from OpenAI API.")
+        
         print(f"[Timing] 2. OpenAI GPT-4o-mini call: {time.time() - start_gpt_call:.4f}s")
-
 
         start_romanize_translated = time.time()
         translated_romanized_pronunciation = convert_pronunciation_to_roman(translated_text)
         print(f"[Timing] 3. Translated Romanization: {time.time() - start_romanize_translated:.4f}s")
 
-
         start_google_translate = time.time()
         translated_english_translation = translate_korean_to_english(translated_text)
         print(f"[Timing] 4. Google Translate call: {time.time() - start_google_translate:.4f}s")
 
-
         keywords_with_definitions = []
         start_extract_keywords_pos = time.time()
-        keywords = extract_words_9pos(translated_text) # (단어, 품사) 튜플의 리스트
+        keywords = extract_words_9pos(translated_text)
         print(f"[Timing] 5. Keyword extraction (Okt): {time.time() - start_extract_keywords_pos:.4f}s (Found {len(keywords)} keywords)")
-
         
-        # 키워드별 국어사전 API 호출 시간은 get_word_info_filtered 함수 내부에서 측정됨
         start_dict_calls_total = time.time()
         for i, (word, pos_tag) in enumerate(keywords):
-            # get_word_info_filtered 함수 내부에 이미 로깅 코드가 추가되어 있습니다.
             senses = get_word_info_filtered(word)
 
             if senses:
@@ -363,7 +377,6 @@ async def translate_to_easy_korean(input_data: TextInput):
                     "definitions": formatted_senses,
                 })
         print(f"[Timing] 6. Total Dictionary API calls for {len(keywords)} keywords: {time.time() - start_dict_calls_total:.4f}s")
-
 
         total_processing_time = time.time() - start_total
         print(f"[Timing] --- Request Processed --- Total time: {total_processing_time:.4f}s")
@@ -378,7 +391,7 @@ async def translate_to_easy_korean(input_data: TextInput):
         })
 
     except Exception as e:
-        import traceback # 예외 발생 시 전체 스택 트레이스 출력
+        import traceback
         traceback.print_exc()
         print(f"[ERROR] API 처리 중 에러: {e}")
         total_processing_time = time.time() - start_total
