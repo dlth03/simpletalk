@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from google.cloud import texttospeech
 
 # g2pk 및 okt-korean 관련 임포트
-from g2pk import G2pKo # G2KoKoreanRomanizer 대신 G2pKo 임포트
+from g2pk import G2p # G2pKo 대신 G2p 임포트
 from okt import Okt
 
 # NLTK 데이터 다운로드 (render 배포 시 필요)
@@ -77,7 +77,7 @@ app.add_middleware(
 # --- Global 인스턴스 (필요에 따라) ---
 # Okt 인스턴스는 한 번만 생성하는 것이 효율적
 okt = Okt()
-romanizer = G2pKo() # G2KoKoreanRomanizer() 대신 G2pKo()로 인스턴스화
+romanizer = G2p() # G2pKo() 대신 G2p()로 인스턴스화
 # ThreadPoolExecutor for blocking I/O operations (like Google TTS)
 executor = ThreadPoolExecutor(max_workers=5) # 적절한 워커 수 설정
 
