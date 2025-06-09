@@ -2,6 +2,8 @@ import os
 import uuid
 import tempfile
 import asyncio
+import functools # <-- 이 줄이 추가되었습니다!
+
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -143,10 +145,11 @@ else:
 # 8) 헬퍼 함수들 (수정 및 추가)
 # ==========================================
 
-# 동기 함수를 비동기적으로 실행하기 위한 헬퍼 (asyncio.to_thread와 유사)
+# to_thread 헬퍼 함수 수정: 키워드 인자도 받을 수 있도록
 async def to_thread(func, *args, **kwargs):
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, func, *args, **kwargs)
+    # functools.partial을 사용하여 함수와 인자들을 묶어서 executor에 전달
+    return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
 
 def convert_pronunciation_to_roman_sync(sentence: str) -> str:
     # 이 함수는 to_thread를 통해 실행될 동기 함수입니다.
@@ -349,6 +352,7 @@ async def translate_to_easy_korean(input_data: TextInput):
     try:
         # 1) GPT 호출 (동기 함수를 to_thread로 비동기 실행)
         start_gpt_call = time.time()
+        # to_thread 함수가 키워드 인자를 받을 수 있도록 수정했으므로, 이제 그대로 전달
         translated_text = await to_thread(create_chat_completion_sync, SYSTEM_PROMPT, input_data.text, model="gpt-4o-mini", temperature=0.7)
         if translated_text is None:
             raise HTTPException(status_code=500, detail="Failed to get response from OpenAI API.")
