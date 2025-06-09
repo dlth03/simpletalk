@@ -3,7 +3,7 @@ uvicorn[standard]
 python-multipart
 openai
 google-cloud-texttospeech
-g2pk==0.3.2
+g2pk
 hangul-romanize
 deep-translator
 konlpy
