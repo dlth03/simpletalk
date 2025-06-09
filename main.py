@@ -2,7 +2,7 @@ import os
 import uuid
 import tempfile
 import asyncio
-import functools # <-- 이 줄이 추가되었습니다!
+import functools
 
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import JSONResponse
@@ -20,9 +20,6 @@ from konlpy.tag import Okt
 from bs4 import BeautifulSoup
 import time
 import httpx # 비동기 HTTP 요청용
-
-# Google Cloud TTS 라이브러리
-from google.cloud import texttospeech
 
 # ==========================================
 # 1) GOOGLE_APPLICATION_CREDENTIALS 환경 변수 처리
@@ -171,7 +168,13 @@ def extract_words_9pos_sync(sentence: str):
     result = []
     for word, tag in words:
         pos = okt_to_nine_pos.get(tag)
-        if word == '아주' and pos == '명사': # Okt가 '아주'를 명사로 잘못 분류하는 경우
+
+        # '대해' 단어가 명사로 분류되든 아니든, 무조건 사전 조회 대상에서 제외
+        if word == '대해':
+            continue
+
+        # '아주'가 명사로 잘못 분류되는 경우 처리 (기존 로직)
+        if word == '아주' and pos == '명사':
             pos = '부사' # '명사'로 분류된 '아주'를 '부사'로 변경
 
         if pos:
